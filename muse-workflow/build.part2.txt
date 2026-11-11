@@ -1,0 +1,235 @@
+          +         *  背景随场景变（全局反色版：按前台界面判定，不再只看桌面壁纸）：
+          +         *   - 在任意 App 里：状态栏与 App 界面沉浸一体，背景就是 App 的状态栏底色，
+          +         *     系统会让 App 按底色亮暗设置 LIGHT_STATUS_BAR 外观位（浅底→深色图标），
+          +         *     这是最准的信号；前台包名由控制循环判定后经缓存读取，不重复打 ATMS；
+          +         *   - 在桌面：外观位由桌面按壁纸设置，同样有效；外观位拿不到时再用
+          +         *     WallpaperManager 的原色提示估算壁纸平均亮度；
+          +         *   - 状态栏容器的纯色背景保留为桌面场景的交叉校验，仍取不到才按深色处理。
+          +         *  每 5 秒重采一次；每次判定写诊断日志（POEM-COLOR 行）：来源 src、采样色
+          +         *  bg、判定 light 与最终文字色 fg，方便对照截图定位误判发生在哪一环。 */
+                   private void updateColor() {
+          -            int bg = sampleStatusBg();
+          -            boolean light = (Color.red(bg) * 299 + Color.green(bg) * 587 + Color.blue(bg) * 114) / 1000 >= 128;
+          -            fgColor = light ? 0xFF111111 : 0xFFFFFFFF;
+          +            BgResult r = sampleStatusBg();
+          +            fgColor = r.light ? 0xFF111111 : 0xFFFFFFFF;
+          +            XposedInit.diagForce("POEM-COLOR src=" + r.src + " bg=#"
+          +                    + Integer.toHexString(r.color) + " light=" + r.light
+          +                    + " fg=#" + Integer.toHexString(fgColor)
+          +                    + " top=" + Controller.topPackageCached());
+                   }
+
+          -        private int sampleStatusBg() {
+          +        /** 背景采样结果：来源、代表色、按该色算出的亮暗。 */
+          +        private static final class BgResult {
+          +            final String src;
+          +            final int color;
+          +            final boolean light;
+          +
+          +            BgResult(String src, int color) {
+          +                this.src = src;
+          +                this.color = color;
+          +                this.light = (Color.red(color) * 299 + Color.green(color) * 587
+          +                        + Color.blue(color) * 114) / 1000 >= 128;
+          +            }
+          +
+          +            BgResult(String src, boolean light) {
+          +                this.src = src;
+          +                this.color = light ? 0xFFF5F5F5 : 0xFF1A1A1A;
+          +                this.light = light;
+          +            }
+          +        }
+          +
+          +        /** 采样当前前台界面在状态栏处的亮度信号（各项独立 try，任一项异常不影响其它）。 */
+          +        private BgResult sampleStatusBg() {
+          +            String top = Controller.topPackageCached();
+          +            boolean inApp = top != null && !top.isEmpty()
+          +                    && !Controller.LAUNCHER_PKGS.contains(top)
+          +                    && !"com.android.systemui".equals(top);
+          +            // 1) 外观位 LIGHT_STATUS_BAR：前台 App（或桌面）按其状态栏底色亮暗设置；
+          +            //    在 App 场景里这是唯一应该信任的信号（壁纸平均色与 App 界面无关）。
+          +            //    桌面上桌面重设外观位有时滞后，故桌面场景先交叉校验容器纯色背景，
+          +            //    两者都拿不到再退外观位。
+          +            if (inApp) {
+          +                Boolean light = appearanceLight();
+          +                if (light != null) {
+          +                    return new BgResult("appearance", light);
+          +                }
+          +            }
+          +            // 2) 状态栏容器的纯色背景（桌面/部分 ROM 给状态栏上纯色底时有效）
+                       try {
+                           android.graphics.drawable.Drawable d = statusView.getBackground();
+                           if (d instanceof android.graphics.drawable.ColorDrawable) {
+          -                    return ((android.graphics.drawable.ColorDrawable) d).getColor();
+          +                    return new BgResult("container",
+          +                            ((android.graphics.drawable.ColorDrawable) d).getColor());
+          +                }
+          +            } catch (Throwable ignored) {
+          +            }
+          +            if (!inApp) {
+          +                Boolean light = appearanceLight();
+          +                if (light != null) {
+          +                    return new BgResult("appearance", light);
+          +                }
+          +            }
+          +            // 3) 壁纸原色提示（系统按壁纸算好的平均色，SystemUI 可直接取）：
+          +            //    仅桌面兜底——它描述的是整张壁纸、不是任何 App 的界面。
+          +            try {
+          +                android.app.WallpaperManager wm = android.app.WallpaperManager
+          +                        .getInstance(getContext());
+          +                if (wm != null) {
+          +                    android.app.WallpaperColors wc = wm.getWallpaperColors(
+          +                            android.app.WallpaperManager.FLAG_SYSTEM);
+          +                    if (wc != null && wc.getPrimaryColor() != null) {
+          +                        return new BgResult("wallpaper", wc.getPrimaryColor().toArgb());
+          +                    }
+          +                }
+          +            } catch (Throwable ignored) {
+          +            }
+          +            return new BgResult("fallback-dark", false); // 都拿不到按深色背景，显示浅色文字
+          +        }
+          +
+          +        /** 读当前 LIGHT_STATUS_BAR 外观位：置位 = 系统要求深色图标 = 背景浅。
+          +         *  两处取或：状态栏窗口根视图的合并 systemUiVisibility（现代 SystemUI 主要
+          +         *  机制），与窗口的 WindowInsetsController 外观位（API 30+ 的 Appearance
+          +         *  对象可能变化，用反射读 int，失败返 null 不抛异常）。都拿不到返 null。 */
+          +        private Boolean appearanceLight() {
+          +            try {
+          +                View root = statusView != null ? statusView.getRootView() : null;
+          +                if (root != null
+          +                        && (root.getSystemUiVisibility()
+          +                        & View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR) != 0) {
+          +                    return Boolean.TRUE;
+          +                }
+          +                if (root != null && android.os.Build.VERSION.SDK_INT >= 30
+          +                        && root.getWindowInsetsController() != null) {
+          +                    Object ap = root.getWindowInsetsController().getSystemBarsAppearance();
+          +                    if (ap instanceof Number
+          +                            && (((Number) ap).intValue() & 8) != 0) { // APPEARANCE_LIGHT_STATUS_BARS
+          +                        return Boolean.TRUE;
+          +                    }
+                           }
+                       } catch (Throwable ignored) {
+                       }
+          -            return 0xFF1A1A1A; // 拿不到按深色背景，显示浅色文字
+          +            return null;
+                   }
+               }
+
+          @@ -876,6 +982,73 @@ public final class Controller {
+                   return base;
+               }
+
+          +    /** 状态栏时钟视图缓存（连同其宿主容器一起记，容器换了就重找）。 */
+          +    private static View clockHost = null;
+          +    private static View clockView = null;
+          +
+          +    /** 读状态栏里“时钟”TextView 的当前文字颜色——这就是原本状态栏自己在用的
+          +     *  颜色：SystemUI 已按前台 App/桌面/锁屏/下拉面板的实际背景算好并实时更新。
+          +     *  古诗与它同步即实现“和原本状态栏一模一样”的全局反色，且每帧只是读一个
+          +     *  属性，是所有方案里开销最小的。找不到时钟（个别 ROM 改了布局）返 null，
+          +     *  调用方退回采样判定。时钟在隐藏期只是 alpha=0，颜色属性照常被系统维护。 */
+          +    static Integer statusBarClockColor() {
+          +        try {
+          +            View host = statusView;
+          +            if (host == null) {
+          +                return null;
+          +            }
+          +            if (clockView == null || clockHost != host) {
+          +                clockHost = host;
+          +                clockView = null;
+          +                int id = host.getResources().getIdentifier(
+          +                        "clock", "id", "com.android.systemui");
+          +                if (id != 0) {
+          +                    clockView = host.findViewById(id);
+          +                }
+          +            }
+          +            if (clockView instanceof android.widget.TextView) {
+          +                return ((android.widget.TextView) clockView).getCurrentTextColor();
+          +            }
+          +        } catch (Throwable ignored) {
+          +        }
+          +        return null;
+          +    }
+          +
+          +    /** 桌面（启动器）包名集合：前台是桌面时古诗背景按壁纸/桌面外观判定；
+          +     *  前台是任意其它 App 时按该 App 的状态栏外观位判定（见 PoemScrollView）。 */
+          +    private static final java.util.Set<String> LAUNCHER_PKGS = new java.util.HashSet<>(
+          +            java.util.Arrays.asList(
+          +                    "com.android.launcher",
+          +                    "com.android.launcher3",
+          +                    "com.google.android.apps.nexuslauncher",
+          +                    "com.miui.home",
+          +                    "com.mi.android.globallauncher",
+          +                    "com.huawei.android.launcher",
+          +                    "com.oppo.launcher",
+          +                    "com.vivo.launcher",
+          +                    "com.sec.android.app.launcher",
+          +                    "com.oneplus.launcher",
+          +                    "net.oneplus.launcher",
+          +                    "com.meizu.flyme.launcher",
+          +                    "com.lineage.launcher3",
+          +                    "org.lineageos.trebuchet"));
+          +
+          +    /** 前台包名缓存（2 秒内复用）：currentTopPackage 内部要走多条反射候选，
+          +     *  古诗 5 秒重采时经此缓存读取，与 tick 的判定同节拍，避免重复打 ATMS。
+          +     *  currentTopPackage 本身保持原样供 tick 使用。 */
+          +    private static String cachedTopPkg = "";
+          +    private static long cachedTopAt = 0;
+          +
+          +    static String topPackageCached() {
+          +        long now = SystemClock.elapsedRealtime();
+          +        if (now - cachedTopAt < 2000L) {
+          +            return cachedTopPkg;
+          +        }
+          +        cachedTopPkg = currentTopPackage();
+          +        cachedTopAt = now;
+          +        return cachedTopPkg;
+          +    }
+          +
+               private static String readComponentPkg(Object task, String field) {
+                   try {
+                       ComponentName c = (ComponentName) XposedHelpers.getObjectField(task, field);
+          PATCH
+          git apply /tmp/antiburn-poem.patch
+          git diff --stat
+
+      - name: Set up Gradle 9.6.0
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Build debug APK
+        working-directory: antiburn-lite
+        run: |
+          set -o pipefail
+          gradle assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/build-full-log.txt"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: antiburn-autoinvert
+          path: antiburn-lite/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp antiburn-lite/app/build/outputs/apk/debug/app-debug.apk antiburn-autoinvert.apk
+          TAG="fixed-key-build"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" antiburn-autoinvert.apk --clobber
+          else
+            gh release create "$TAG" antiburn-autoinvert.apk --title "AntiBurn poem auto-invert (fixed signature)" --notes "Debug build with poem clock-sync auto-invert and a fixed debug signature. Uninstall any older build once, then install this one; later builds overlay-install."
+          fi
+
+      - name: Save build log on failure
+        if: failure()
+        run: |
+          LOG="build-log-${{ github.run_number }}.txt"
+          if [ -f build-full-log.txt ]; then tail -c 60000 build-full-log.txt > "$LOG"; else echo "run=${{ github.run_number }} failed at $(date -u), no gradle log captured" > "$LOG"; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$LOG"
+          git commit -m "Build failure log for run ${{ github.run_number }}"
+          git push || true
