@@ -26,37 +26,22 @@ jobs:
         with:
           packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
 
-      - name: Assemble workflow from chunks
-        run: |
-          if [ -f muse-workflow/build.part1.txt ] && [ -f muse-workflow/build.part2.txt ]; then
-            P1=$(python3 -c "import urllib.parse; print(urllib.parse.unquote(open('muse-workflow/build.part1.txt').read()))")
-            P2=$(python3 -c "import urllib.parse; print(urllib.parse.unquote(open('muse-workflow/build.part2.txt').read()))")
-            printf '%s%s' "$P1" "$P2" > muse-workflow/build.yml.assembled
-            echo "Assembled workflow: $(wc -c < muse-workflow/build.yml.assembled) bytes"
-          else
-            echo "No chunks present (normal build run)"
-          fi
-
       - name: Set up fixed debug keystore
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$HOME/.android"
           if [ -f keystore/debug.keystore.b64 ]; then
-            echo "Using committed fixed debug keystore"
             base64 -d keystore/debug.keystore.b64 > "$HOME/.android/debug.keystore"
+            echo "Restored fixed debug keystore from repo"
           else
-            echo "Generating fixed debug keystore (first run) and committing it back"
+            mkdir -p "$HOME/.android" keystore
             keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-            mkdir -p keystore
             base64 -w0 "$HOME/.android/debug.keystore" > keystore/debug.keystore.b64
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add keystore/debug.keystore.b64
             git commit -m "Add fixed debug keystore (base64) for stable APK signature"
             git push
+            echo "Generated and committed fixed debug keystore"
           fi
-          ls -la "$HOME/.android/debug.keystore"
 
       - name: Apply poem auto-invert patch
         run: |
@@ -300,8 +285,7 @@ jobs:
                    }
 
           -        /** 采样状态栏背景亮度：浅背景→深字，深背景→浅字 */
-          +        /** 按“当前前台界面”在状态栏处的亮度选古诗颜色：浅背景→深字，深背景→浅字。
-          +         *  背景随场景变（全局反色版：按前台界面判定，不再只看桌面壁纸）：
+          +        /** 按“当前前台界面”在状态栏处的亮度选古诗颜色：浅背景→深字，深背景→浅字。          +         *  背景随场景变（全局反色版：按前台界面判定，不再只看桌面壁纸）：
           +         *   - 在任意 App 里：状态栏与 App 界面沉浸一体，背景就是 App 的状态栏底色，
           +         *     系统会让 App 按底色亮暗设置 LIGHT_STATUS_BAR 外观位（浅底→深色图标），
           +         *     这是最准的信号；前台包名由控制循环判定后经缓存读取，不重复打 ATMS；
@@ -504,9 +488,7 @@ jobs:
 
       - name: Build debug APK
         working-directory: antiburn-lite
-        run: |
-          set -o pipefail
-          gradle assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/build-full-log.txt"
+        run: set -o pipefail; gradle assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/build-full-log.txt"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -514,40 +496,26 @@ jobs:
           name: antiburn-autoinvert
           path: antiburn-lite/app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Commit assembled workflow back and retrigger
-        if: ${{ hashFiles('muse-workflow/build.yml.assembled') != '' }}
-        run: |
-          mv muse-workflow/build.yml.assembled muse-workflow/build.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add muse-workflow/build.yml
-          if git diff --cached --quiet; then
-            echo "Workflow already up to date"
-          else
-            git commit -m "Assemble fixed-key workflow (self-update)"
-            git push
-          fi
-
       - name: Publish APK to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp antiburn-lite/app/build/outputs/apk/debug/app-debug.apk antiburn-autoinvert.apk
-          TAG="fixed-key-build"
+          TAG=fixed-key-build
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" antiburn-autoinvert.apk --clobber
           else
-            gh release create "$TAG" antiburn-autoinvert.apk --title "AntiBurn poem auto-invert (fixed signature)" --notes "Debug build with poem clock-sync auto-invert and a fixed debug signature. Uninstall any older build once, then install this one; later builds overlay-install."
+            gh release create "$TAG" antiburn-autoinvert.apk --title "AntiBurn poem auto-invert (fixed signature)" --notes "Install this build (uninstall any older build once first). Later builds share this signature and can overlay-install."
           fi
 
       - name: Save build log on failure
         if: failure()
         run: |
-          LOG="build-log-${{ github.run_number }}.txt"
-          if [ -f build-full-log.txt ]; then tail -c 60000 build-full-log.txt > "$LOG"; else echo "run=${{ github.run_number }} failed at $(date -u), no gradle log captured" > "$LOG"; fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$LOG"
-          git commit -m "Build failure log for run ${{ github.run_number }}"
-          git push || true
-
+          if [ -f build-full-log.txt ]; then
+            tail -c 60000 build-full-log.txt > "build-log-${{ github.run_number }}.txt"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "build-log-${{ github.run_number }}.txt"
+            git commit -m "Build failure log for run ${{ github.run_number }}"
+            git push || true
+          fi
