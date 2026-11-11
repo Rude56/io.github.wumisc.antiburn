@@ -1,0 +1,485 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+      - name: Apply poem auto-invert patch
+        run: |
+          cat > antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/FeatureGuard.java <<'JAVA_EOF_1'
+          package io.github.wumisc.antiburn;
+
+          import java.util.concurrent.ConcurrentHashMap;
+
+          /**
+           * 异常熔断隔离（补写实现：原仓库 README 与代码注释提及该组件，但源文件未随仓库
+           * 提交，此处按注释写明的语义实现）。
+           *
+           * 语义：以 key 为单位托管一段逻辑的执行。逻辑正常返回则清零该 key 的失败计数；
+           * 逻辑抛异常则计数加一，累计达到 {@link #MAX_FAILURES} 次后该 key 被熔断，
+           * 后续调用直接跳过、不再执行，直到进程重启。任何一处功能的反复异常只会熔断
+           * 它自己，不影响其它功能，更不会把宿主进程（SystemUI）打崩。
+           */
+          public final class FeatureGuard {
+
+              private static final int MAX_FAILURES = 3;
+
+              private static final ConcurrentHashMap<String, Integer> FAILURES =
+                      new ConcurrentHashMap<>();
+
+              private FeatureGuard() {
+              }
+
+              /** 在熔断保护下执行 task；已熔断的 key 直接跳过。 */
+              public static void guard(String key, Runnable task) {
+                  Integer fails = FAILURES.get(key);
+                  if (fails != null && fails >= MAX_FAILURES) {
+                      return; // 已熔断：跳过执行，等待进程重启恢复
+                  }
+                  try {
+                      task.run();
+                      if (fails != null && fails > 0) {
+                          FAILURES.remove(key); // 成功一次即清零
+                      }
+                  } catch (Throwable t) {
+                      int n = (fails == null ? 0 : fails) + 1;
+                      FAILURES.put(key, n);
+                      try {
+                          XposedInit.diag("FeatureGuard[" + key + "] 异常 " + n + "/"
+                                  + MAX_FAILURES + ": " + t);
+                          if (n >= MAX_FAILURES) {
+                              XposedInit.diagForce("FeatureGuard[" + key + "] 已熔断，"
+                                      + "该功能停用至 SystemUI 重启");
+                          }
+                      } catch (Throwable ignored) {
+                      }
+                  }
+              }
+
+              /** 该 key 是否已被熔断。 */
+              public static boolean isTripped(String key) {
+                  Integer fails = FAILURES.get(key);
+                  return fails != null && fails >= MAX_FAILURES;
+              }
+          }
+          JAVA_EOF_1
+          cat > antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/PixelShift.java <<'JAVA_EOF_2'
+          package io.github.wumisc.antiburn;
+
+          import android.view.View;
+
+          /**
+           * 像素偏移防烧屏引擎（补写实现：原仓库 README 与代码注释提及该组件，但源文件
+           * 未随仓库提交，此处按注释写明的语义实现）。
+           *
+           * 与 AOSP BurnInProtectionController 同思路：把状态栏/导航栏容器缓慢平移
+           * ±{@link #MAX_SHIFT_PX} px，视觉几乎无感，但图标轮廓不再长期压在同一批像素上。
+           * Controller 的主循环约每 2 秒调用一次 {@link #tick()}，本引擎每
+           * {@link #TICKS_PER_STEP} 次 tick 才前进一步（约 1 分钟一步），走完一个
+           * 5×5 的巡回网格约 25 分钟，足够分摊轮廓又不会肉眼可见地漂移。
+           *
+           * guardCenter 语义：巡回路径始终围绕原点（偏移有界、均值回归中心），本实现恒
+           * 为 true；Controller 仅将其用于诊断日志，不参与控制逻辑。
+           *
+           * 全部方法只操作 View 的 translationX/translationY，shutdown 时归零还原。
+           * 状态为进程级静态单例，与 Controller 的静态调用方式一致。
+           */
+          public final class PixelShift {
+
+              private static final int MAX_SHIFT_PX = 2;
+              private static final int TICKS_PER_STEP = 30; // 30 × ~2s ≈ 60s 一步
+
+              /** 巡回网格坐标（-2..2），蛇形遍历，一圈 25 步后回到原点。 */
+              private static final int[] PATH_X = new int[25];
+              private static final int[] PATH_Y = new int[25];
+
+              static {
+                  int i = 0;
+                  for (int y = -MAX_SHIFT_PX; y <= MAX_SHIFT_PX; y++) {
+                      if ((y & 1) == 0) {
+                          for (int x = -MAX_SHIFT_PX; x <= MAX_SHIFT_PX; x++) {
+                              PATH_X[i] = x;
+                              PATH_Y[i] = y;
+                              i++;
+                          }
+                      } else {
+                          for (int x = MAX_SHIFT_PX; x >= -MAX_SHIFT_PX; x--) {
+                              PATH_X[i] = x;
+                              PATH_Y[i] = y;
+                              i++;
+                          }
+                      }
+                  }
+              }
+
+              private static View statusView;
+              private static View navView;
+              private static String style = "";
+              private static int tickCount;
+              private static int stepIndex;
+              private static boolean active;
+
+              private PixelShift() {
+              }
+
+              /** 记录当前 UI 方案（aosp / miuix 等）；仅存值与参与日志，不改变偏移算法。 */
+              public static void setStyle(String s) {
+                  style = s == null ? "" : s;
+              }
+
+              /** 偏移是否始终围绕中心有界巡回（本实现的设计保证）。 */
+              public static boolean isGuardCenter() {
+                  return true;
+              }
+
+              /** 绑定要平移的状态栏/导航栏容器；每次 Controller 循环都会调用，幂等。 */
+              public static void bind(View status, View nav) {
+                  statusView = status;
+                  navView = nav;
+                  if (status != null || nav != null) {
+                      active = true;
+                  }
+              }
+
+              /** 推进偏移节拍：累计 TICKS_PER_STEP 次后沿巡回网格前进一步并应用平移。 */
+              public static void tick() {
+                  if (!active) {
+                      return;
+                  }
+                  if (++tickCount < TICKS_PER_STEP) {
+                      return;
+                  }
+                  tickCount = 0;
+                  stepIndex = (stepIndex + 1) % PATH_X.length;
+                  apply(PATH_X[stepIndex], PATH_Y[stepIndex]);
+              }
+
+              /** 是否已绑定并处于工作状态。 */
+              public static boolean isActive() {
+                  return active;
+              }
+
+              /** 停止偏移并把平移归零，还原容器原位。 */
+              public static void shutdown() {
+                  apply(0, 0);
+                  statusView = null;
+                  navView = null;
+                  active = false;
+                  tickCount = 0;
+                  stepIndex = 0;
+              }
+
+              private static void apply(int dx, int dy) {
+                  try {
+                      if (statusView != null) {
+                          statusView.setTranslationX(dx);
+                          statusView.setTranslationY(dy);
+                      }
+                  } catch (Throwable ignored) {
+                  }
+                  try {
+                      if (navView != null) {
+                          navView.setTranslationX(dx);
+                          navView.setTranslationY(dy);
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+          }
+          JAVA_EOF_2
+          ls -la antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/FeatureGuard.java antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/PixelShift.java
+          cat > antiburn-lite/app/src/main/res/drawable/ic_launcher_fg.xml <<'XML_EOF_1'
+          <!-- 补写资源：原仓库的自适应图标引用了 @drawable/ic_launcher_fg，但该文件未随
+               仓库提交。此处按图标背景色 #162233（深蓝）配浅色前景，画一个简洁的
+               “护盾 + 对勾”矢量图（防烧屏 = 守护屏幕），仅影响桌面图标外观。 -->
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#E8F1FF"
+                  android:pathData="M54,26 L78,34 L78,52 C78,68 68,78 54,84 C40,78 30,68 30,52 L30,34 Z" />
+              <path
+                  android:fillColor="#162233"
+                  android:pathData="M47,55 L38,46 L35,49 L47,61 L73,35 L70,32 Z" />
+          </vector>
+          XML_EOF_1
+          ls -la antiburn-lite/app/src/main/res/drawable/ic_launcher_fg.xml
+          cat > /tmp/antiburn-poem.patch <<'PATCH'
+          diff --git a/antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/Controller.java b/antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/Controller.java
+          index c6ad5f5..038c3a8 100644
+          --- a/antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/Controller.java
+          +++ b/antiburn-lite/app/src/main/java/io/github/wumisc/antiburn/Controller.java
+          @@ -408,6 +408,8 @@ public final class Controller {
+                       XposedInit.diag("SHIFT 已关闭，位移归零");
+                   }
+
+          +        // 古诗点按恢复：点过之后 tick 内不再重复排期，直到回到隐藏期才复位
+          +        tickPeekDone = false;
+                   // 古诗弹幕与隐藏期严格同步（只在隐藏窗口显示，显示窗口移除）
+                   updatePoem();
+
+          @@ -417,6 +419,30 @@ public final class Controller {
+                   handler.postDelayed(cycleRunnable, Math.min(2000L, Math.max(100L, remain)));
+               }
+
+          +    /** 点按古诗后、本轮 tick 内是否已排期过恢复（防 tick 自循环重复排期）。 */
+          +    private static boolean tickPeekDone = false;
+          +
+          +    /** 点按古诗 → 临时恢复状态栏（显示时间等真实内容）3 秒，随后无缝回到隐藏。
+          +     *  只改视图 alpha 与古诗浮层的显隐，不触碰周期相位：到点由 postDelayed
+          +     *  直接 applyHide() 把本相位应有的隐藏态（含古诗）恢复回来；若这 3 秒内
+          +     *  相位自然切换，tick 的 applyShow/applyHide 会覆盖本次恢复，互不打架。
+          +     *  恢复时长取 3 秒（瞄一眼时间的量级；要调改这一个常量即可）。 */
+          +    static void peekStatusBar() {
+          +        if (tickPeekDone) {
+          +            return;
+          +        }
+          +        tickPeekDone = true;
+          +        XposedInit.diagForce("POEM-TAP peek: restore status bar 3s");
+          +        applyShow();
+          +        removePoemScroll();
+          +        handler.postDelayed(() -> {
+          +            if (hidden) {
+          +                applyHide();
+          +                updatePoem();
+          +            }
+          +        }, 3000);
+          +    }
+          +
+               // ---------- 隐藏期间滚动励志古诗 ----------
+
+               /** 上一次应用到 PixelShift 的 UI 方案，变化时才重设并打日志 */
+          @@ -454,9 +480,12 @@ public final class Controller {
+                               w, h,
+                               WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                               WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+          -                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                       | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                               PixelFormat.TRANSLUCENT);
+          +            // 可触摸（去掉 FLAG_NOT_TOUCHABLE）：点一下古诗就临时恢复状态栏看时间。
+          +            // 代价：隐藏期间状态栏区域的下拉手势被这层浮层吃掉，下拉通知要在
+          +            // 显示窗口或点按恢复的 3 秒内做。原 FLAG_NOT_TOUCHABLE 注释里“保留
+          +            // 下拉把手”的设计因此让位于点按恢复，二者不可兼得（同一层窗口）。
+                       lp.gravity = Gravity.TOP | Gravity.START;
+                       lp.x = loc[0];
+                       // 弹幕：一行横向滚动，显示在状态栏区域内（隐藏期替代状态栏内容），不遮挡 App 界面
+          @@ -519,7 +548,7 @@ public final class Controller {
+               }
+
+               /** 状态栏隐藏时轮播励志古诗：一次显示一首，自动折行最多 3 行，
+          -     *  随机顺序播放（播完一轮重新洗牌），背景反色自适应（浅背景→深字，深背景→浅字）。 */
+          +     *  随机顺序播放（播完一轮重新洗牌），壁纸亮度自适应反色（浅壁纸→深字，深壁纸→浅字）。 */
+               static class PoemScrollView extends View {
+                   private static final long FRAME_MS = 40;    // 25fps（与弹幕版滚动一致，流畅省电）
+                   private static final float SPEED_PX = 120f; // 每秒滚动像素（弹幕横向滚动，120px/s 明快）
+          @@ -562,6 +591,8 @@ public final class Controller {
+                               ? java.util.Collections.singletonList("") : list);
+                       textPaint.setTextSize(dp(c, 14));
+                       textPaint.setFakeBoldText(true);
+          +            // 点按恢复：单击即触发（不用手势检测，避免与滚动动画相互干扰）
+          +            setOnClickListener(v -> Controller.peekStatusBar());
+                   }
+
+                   @Override
+          @@ -617,22 +648,116 @@ public final class Controller {
+                       invalidate();
+                   }
+
+          -        /** 采样状态栏背景亮度：浅背景→深字，深背景→浅字 */
+          +        /** 按“当前前台界面”在状态栏处的亮度选古诗颜色：浅背景→深字，深背景→浅字。
+          +         *  背景随场景变（第二版：按前台界面判定，不再只看桌面壁纸）：
+          +         *   - 在任意 App 里：状态栏与 App 界面沉浸一体，背景就是 App 的状态栏底色，
+          +         *     系统会让 App 按底色亮暗设置 LIGHT_STATUS_BAR 外观位（浅底→深色图标），
+          +         *     这是最准的信号，前台包名每个 2s 控制循环都在判定，直接读即可；
+          +         *   - 在桌面：外观位由桌面按壁纸设置，同样有效；外观位拿不到时再用
+          +         *     WallpaperManager 的原色提示估算壁纸平均亮度；
+          +         *   - 状态栏容器的纯色背景保留为桌面场景的交叉校验，仍取不到才按深色处理。
+          +         *  每次判定都写诊断日志（POEM-COLOR 行）：来源 src、采样色 bg、判定 light
+          +         *  与最终文字色 fg，方便对照截图定位误判发生在哪一环。 */
+                   private void updateColor() {
+          -            int bg = sampleStatusBg();
+          -            boolean light = (Color.red(bg) * 299 + Color.green(bg) * 587 + Color.blue(bg) * 114) / 1000 >= 128;
+          -            fgColor = light ? 0xFF111111 : 0xFFFFFFFF;
+          +            BgResult r = sampleStatusBg();
+          +            fgColor = r.light ? 0xFF111111 : 0xFFFFFFFF;
+          +            XposedInit.diagForce("POEM-COLOR src=" + r.src + " bg=#"
+          +                    + Integer.toHexString(r.color) + " light=" + r.light
+          +                    + " fg=#" + Integer.toHexString(fgColor)
+          +                    + " top=" + Controller.topPackageCached());
+                   }
+
+          -        private int sampleStatusBg() {
+          +        /** 背景采样结果：来源、代表色、按该色算出的亮暗。 */
+          +        private static final class BgResult {
+          +            final String src;
+          +            final int color;
+          +            final boolean light;
+          +
+          +            BgResult(String src, int color) {
+          +                this.src = src;
+          +                this.color = color;
+          +                this.light = (Color.red(color) * 299 + Color.green(color) * 587
+          +                        + Color.blue(color) * 114) / 1000 >= 128;
+          +            }
+          +
+          +            BgResult(String src, boolean light) {
+          +                this.src = src;
+          +                this.color = light ? 0xFFF5F5F5 : 0xFF1A1A1A;
+          +                this.light = light;
+          +            }
+          +        }
+          +
+          +        /** 采样当前前台界面在状态栏处的亮度信号（各项独立 try，任一项异常不影响其它）。 */
+          +        private BgResult sampleStatusBg() {
+          +            String top = Controller.topPackageCached();
+          +            boolean inApp = top != null && !top.isEmpty()
+          +                    && !Controller.LAUNCHER_PKGS.contains(top)
+          +                    && !"com.android.systemui".equals(top);
+          +            // 1) 外观位 LIGHT_STATUS_BAR：前台 App（或桌面）按其状态栏底色亮暗设置；
+          +            //    在 App 场景里这是唯一应该信任的信号（壁纸平均色与 App 界面无关）。
+          +            //    桌面上桌面重设外观位有时滞后，故桌面场景先交叉校验容器纯色背景，
+          +            //    两者都拿不到再退外观位。
+          +            if (inApp) {
+          +                Boolean light = appearanceLight();
+          +                if (light != null) {
+          +                    return new BgResult("appearance", light);
+          +                }
+          +            }
+          +            // 2) 状态栏容器的纯色背景（桌面/部分 ROM 给状态栏上纯色底时有效）
+                       try {
+                           android.graphics.drawable.Drawable d = statusView.getBackground();
+                           if (d instanceof android.graphics.drawable.ColorDrawable) {
+          -                    return ((android.graphics.drawable.ColorDrawable) d).getColor();
+          +                    return new BgResult("container",
+          +                            ((android.graphics.drawable.ColorDrawable) d).getColor());
+          +                }
+          +            } catch (Throwable ignored) {
+          +            }
+          +            if (!inApp) {
+          +                Boolean light = appearanceLight();
+          +                if (light != null) {
+          +                    return new BgResult("appearance", light);
+          +                }
+          +            }
+          +            // 3) 壁纸原色提示：桌面场景的外观位/容器都拿不到时，用系统给出的壁纸
+          +            //    平均色（system 面）估算；它描述的不是 App 界面，仅作桌面兜底。
+          +            try {
+          +                android.app.WallpaperManager wm = android.app.WallpaperManager
+          +                        .getInstance(getContext());
+          +                if (wm != null) {
+          +                    android.app.WallpaperColors wc = wm.getWallpaperColors(
+          +                            android.app.WallpaperManager.FLAG_SYSTEM);
+          +                    if (wc != null && wc.getPrimaryColor() != null) {
+          +                        return new BgResult("wallpaper", wc.getPrimaryColor().toArgb());
+          +                    }
+                           }
+                       } catch (Throwable ignored) {
+                       }
+          -            return 0xFF1A1A1A; // 拿不到按深色背景，显示浅色文字
+          +            return new BgResult("fallback-dark", false); // 都拿不到按深色背景，显示浅色文字
+          +        }
+          +
+          +        /** 读当前 LIGHT_STATUS_BAR 外观位：置位 = 系统要求深色图标 = 背景浅。
+          +         *  两处取或：状态栏窗口根视图的合并 systemUiVisibility（现代 SystemUI 主要
+          +         *  机制），与窗口的 WindowInsetsController 外观位（API 30+ 的 Appearance
+          +         *  对象可能变化，用反射读 int，失败返 null 不抛异常）。都拿不到返 null。 */
+          +        private Boolean appearanceLight() {
+          +            try {
+          +                View root = statusView != null ? statusView.getRootView() : null;
+          +                if (root != null
+          +                        && (root.getSystemUiVisibility()
+          +                        & View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR) != 0) {
+          +                    return Boolean.TRUE;
+          +                }
+          +                if (root != null && android.os.Build.VERSION.SDK_INT >= 30
+          +                        && root.getWindowInsetsController() != null) {
+          +                    Object ap = root.getWindowInsetsController().getSystemBarsAppearance();
+          +                    if (ap instanceof Number
+          +                            && (((Number) ap).intValue() & 8) != 0) { // APPEARANCE_LIGHT_STATUS_BARS
+          +                        return Boolean.TRUE;
+          +                    }
+          +                }
+          +            } catch (Throwable ignored) {
+          +            }
+          +            return null;
+                   }
+               }
+
+          @@ -876,6 +1001,41 @@ public final class Controller {
+                   return base;
+               }
+
+          +    /** 桌面（启动器）包名集合：前台是桌面或 SystemUI 自身时，古诗背景按壁纸
+          +     *  判定；前台是任意其它 App 时按该 App 的状态栏外观位判定（见 PoemScrollView）。 */
+          +    private static final java.util.Set<String> LAUNCHER_PKGS = new java.util.HashSet<>(
+          +            java.util.Arrays.asList(
+          +                    "com.android.launcher",
+          +                    "com.android.launcher3",
+          +                    "com.google.android.apps.nexuslauncher",
+          +                    "com.miui.home",
+          +                    "com.mi.android.globallauncher",
+          +                    "com.huawei.android.launcher",
+          +                    "com.oppo.launcher",
+          +                    "com.vivo.launcher",
+          +                    "com.sec.android.app.launcher",
+          +                    "com.oneplus.launcher",
+          +                    "net.oneplus.launcher",
+          +                    "com.meizu.flyme.launcher",
+          +                    "com.lineage.launcher3",
+          +                    "org.lineageos.trebuchet"));
+          +
+          +    /** 前台包名缓存（2 秒内复用）：currentTopPackage 内部要走多条反射候选，
+          +     *  古诗 5 秒重采时直接调原实现即可，但这里加一层与控制循环同节拍的缓存，
+          +     *  避免在取色路径上重复打 ATMS。currentTopPackage 本身保持原样供 tick 使用。 */
+          +    private static String cachedTopPkg = "";
+          +    private static long cachedTopAt = 0;
+          +
+          +    static String topPackageCached() {
+          +        long now = SystemClock.elapsedRealtime();
+          +        if (now - cachedTopAt < 2000L) {
+          +            return cachedTopPkg;
+          +        }
+          +        cachedTopPkg = currentTopPackage();
+          +        cachedTopAt = now;
+          +        return cachedTopPkg;
+          +    }
+          +
+               private static String readComponentPkg(Object task, String field) {
+                   try {
+                       ComponentName c = (ComponentName) XposedHelpers.getObjectField(task, field);
+          PATCH
+          git apply /tmp/antiburn-poem.patch
+          git diff --stat
+
+      - name: Set up Gradle 9.6.0
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Build debug APK
+        working-directory: antiburn-lite
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: antiburn-autoinvert
+          path: antiburn-lite/app/build/outputs/apk/debug/app-debug.apk
