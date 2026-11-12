@@ -851,6 +851,7 @@ private fun BurnInProtectApp() {
                             saveBar = saveBar,
                             featurePage = featurePage,
                             onFeaturePageChange = { featurePage = it },
+                            onOpen = openSub,
                         )
                         2 -> AboutPage(onOpen = openSub, onOpenUrl = openUrl)
                     }
@@ -1172,6 +1173,7 @@ private fun FeaturesPage(
     saveBar: @Composable () -> Unit,
     featurePage: Int,
     onFeaturePageChange: (Int) -> Unit,
+    onOpen: (String) -> Unit,
 ) {
     val dark = isSystemInDarkTheme()
     Column(
@@ -1217,6 +1219,13 @@ private fun FeaturesPage(
                 // 总闸开启后的固有行为（hideStatusKeepNotify），无需第二个入口。
                 TileGrid(
                     listOf(
+                        TileItem(
+                            title = "古诗虫",
+                            glyph = "诗",
+                            subtitle = "滚动诗句 · 时间交替",
+                            checked = state.enablePoem,
+                            navClick = { onOpen("poem") },
+                        ),
                         TileItem("导航栏", "导", "底部系统导航栏", state.enableNav) {
                             onStateChange { s -> s.copy(enableNav = !s.enableNav) }
                         },
