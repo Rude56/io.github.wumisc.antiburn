@@ -58,6 +58,13 @@ public final class DouyinHook {
     private static boolean started = false;
     private static boolean hidden = false;
     private static boolean isDrama = false; // 红果短剧（com.phoenix.read 系）进程：用红果独立开关
+    /**
+     * v2.7：当前是否直播间的唯一判定结果，由 rescan 在收集完节点后一次性算出并提交。
+     * 旧版 anyEnabled 用 isLiveStrong()、hideEnabled 用 isLive()、rescan 另有一套 local live，
+     * 三套判定互相打架：只开「直播间隐藏」时进不了隐藏窗口，或普通视频页被连带否决。
+     * 现在三处统一只读这一个字段。
+     */
+    private static volatile boolean liveDetected = false;
 
     private static long lastScan = 0L;
 
@@ -212,46 +219,17 @@ public final class DouyinHook {
         }
     }
 
-    /** 检测当前是否直播间。仅抖音进程存在直播；红果短剧无直播页，恒返回 false，
-     *  否则兜底收集的贴底横条会让红果/抖音普通视频页被误判为直播，
-     *  导致关闭"直播间隐藏"后整个进程都不再隐藏。 */
+    /**
+     * 当前是否直播间：只读 rescan 提交的唯一结果。
+     * v2.7 起不再各自即时判定，避免 isLive / isLiveStrong / rescan-local 三套结论冲突。
+     */
     private static boolean isLive() {
-        if (isDrama) {
-            return false;
-        }
-        if (rightTop != null && "RoundCornerFrameLayout".equals(rightTop.getClass().getSimpleName())) {
-            return true;
-        }
-        // 抖音直播页：底部是输入条/固定 UI 容器而非首页导航。
-        // 旧版只要「有贴底横条且无 MainBottomTabContainer」就判直播，普通视频页同样符合，
-        // 会让五个普通区域开关整体失效。现在额外要求确实识别到了直播专属三区视图。
-        boolean liveViews = !liveTopList.isEmpty() || !liveBottomList.isEmpty()
-                || !liveRightList.isEmpty();
-        if (liveViews && bottomList != null && !bottomList.isEmpty()) {
-            for (View b : bottomList) {
-                if ("MainBottomTabContainer".equals(b.getClass().getSimpleName())) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        return false;
+        return !isDrama && liveDetected;
     }
 
-    /** 强直播特征：用于判断是否允许仅凭「直播间隐藏」开关进入周期。 */
-    private static boolean isLiveStrong() {
-        if (isDrama) {
-            return false;
-        }
-        if (rightTop != null && "RoundCornerFrameLayout".equals(rightTop.getClass().getSimpleName())) {
-            return true;
-        }
-        return !liveTopList.isEmpty() || !liveBottomList.isEmpty() || !liveRightList.isEmpty();
-    }
-
-    private static void dumpNode(View v, StringBuilder sb, int depth, int count) {
+    private static int dumpNode(View v, StringBuilder sb, int depth, int count) {
         if (v == null || depth > 18 || count > 1000) {
-            return;
+            return count;
         }
         for (int i = 0; i < depth; i++) {
             sb.append("  ");
@@ -267,15 +245,17 @@ public final class DouyinHook {
                 .append(" vis=").append(v.getVisibility()).append(" alpha=").append(v.getAlpha())
                 .append(" ch=").append(v instanceof ViewGroup ? ((ViewGroup) v).getChildCount() : 0)
                 .append('\n');
+        count++; // v2.5：旧版递归传 count+1 实际等于 depth，1000 节点上限从未生效
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
             if (v.getVisibility() == View.GONE) {
-                return; // GONE 容器子树不绘制，跳过省节点数（避免占位容器挤占 1000 上限）
+                return count; // GONE 容器子树不绘制，跳过省节点数
             }
             for (int i = 0; i < g.getChildCount(); i++) {
-                dumpNode(g.getChildAt(i), sb, depth + 1, count + 1);
+                count = dumpNode(g.getChildAt(i), sb, depth + 1, count);
             }
         }
+        return count;
     }
 
     private static void writeTreeFile(String text) {
@@ -373,18 +353,48 @@ public final class DouyinHook {
             sb.append(" | righttop=").append(rightTop != null ? desc(rightTop) : "NONE")
                     .append(" | lefttop=").append(leftTop != null ? desc(leftTop) : "NONE");
             XposedInit.diag(sb.toString());
-            // 直播间专用三区收集：顶栏/底部大区/右下角按钮组（独立于普通页五区）
-            liveTopList.clear();
-            liveBottomList.clear();
-            liveRightList.clear();
-            if (isLive()) {
-                collectLiveTopNode(root, liveTopList, 0);
-                collectLiveBottomNode(root, liveBottomList, 0);
-                collectLiveRightNode(root, liveRightList, 0);
-                if (!liveTopList.isEmpty() || !liveBottomList.isEmpty() || !liveRightList.isEmpty()) {
-                    XposedInit.diag("LIVE top=x" + liveTopList.size() + " bottom=x"
-                            + liveBottomList.size() + " right=x" + liveRightList.size());
+            // 直播间专用三区收集。
+            // v2.5 修复死锁：旧版先 clear 三个 live list 再调 isLive()，而 isLive()
+            // 的 liveViews 分支恰恰要求这三个 list 非空 —— 于是除 rightTop 命中
+            // RoundCornerFrameLayout 外，直播间永远判不出来，「直播间隐藏」形同虚设。
+            // 现在先收集到临时表，用本轮收集结果判定，通过才提交。
+            java.util.List<View> tTop = new java.util.ArrayList<>();
+            java.util.List<View> tBottom = new java.util.ArrayList<>();
+            java.util.List<View> tRight = new java.util.ArrayList<>();
+            collectLiveTopNode(root, tTop, 0);
+            collectLiveBottomNode(root, tBottom, 0);
+            collectLiveRightNode(root, tRight, 0);
+            boolean hasTab = false;
+            if (bottomList != null) {
+                for (View b : bottomList) {
+                    if ("MainBottomTabContainer".equals(b.getClass().getSimpleName())) {
+                        hasTab = true;
+                        break;
+                    }
                 }
+            }
+            boolean liveNode = !tTop.isEmpty() || !tBottom.isEmpty() || !tRight.isEmpty();
+            boolean strongCorner = rightTop != null
+                    && "RoundCornerFrameLayout".equals(rightTop.getClass().getSimpleName());
+            // v2.7：判定放宽为「强特征命中」或「收集到直播专属节点且底部无首页 Tab」。
+            // 旧版要求 bottomList 非空，但直播底部含 EditText / Compose 输入条会被
+            // containsDynamicUi 排除，bottomList 常为空，导致直播间永远判不出来。
+            boolean live = !isDrama && (strongCorner || (liveNode && !hasTab));
+            liveDetected = live;   // 唯一判定源，anyEnabled / hideEnabled 都读它
+            if (live) {
+                liveTopList.clear();
+                liveTopList.addAll(tTop);
+                liveBottomList.clear();
+                liveBottomList.addAll(tBottom);
+                liveRightList.clear();
+                liveRightList.addAll(tRight);
+                XposedInit.diag("LIVE top=x" + tTop.size() + " bottom=x"
+                        + tBottom.size() + " right=x" + tRight.size()
+                        + " strongCorner=" + strongCorner + " hasTab=" + hasTab);
+            } else {
+                liveTopList.clear();
+                liveBottomList.clear();
+                liveRightList.clear();
             }
             maybeDumpLiveTree(root);
         } catch (Throwable ex) {
@@ -1052,11 +1062,13 @@ public final class DouyinHook {
         if (v == null) {
             return "null";
         }
-        ViewGroup g = (ViewGroup) v;
+        // v2.5：findByClassName 命中的可能是普通 View，旧版无条件强转 ViewGroup
+        // 会抛 ClassCastException 并被 rescan 外层吞掉，导致整轮扫描/隐藏失效。
+        int children = (v instanceof ViewGroup) ? ((ViewGroup) v).getChildCount() : 0;
         StringBuilder sb = new StringBuilder();
         sb.append(v.getClass().getSimpleName())
                 .append(" id=").append(v.getId())
-                .append(" children=").append(g.getChildCount());
+                .append(" children=").append(children);
         try {
             int[] loc = new int[2];
             v.getLocationOnScreen(loc);
@@ -1139,9 +1151,11 @@ public final class DouyinHook {
         // 红果进程必须用红果开关判断，否则红果开关开了也不进隐藏窗口
         boolean anyEnabled;
         if (isDrama) {
+            // v2.7：红果底部是「完整观看/选集」功能入口，hideEnabled 里强制常驻不隐藏，
+            // enableDramaBottom 也没有可点开的 UI（恒 false）。旧版却把它算进 anyEnabled，
+            // 于是 qualifies 了一个根本不会隐藏的区域，白白跑完整周期。这里移除。
             anyEnabled = (Config.enableDramaLike && !rightList.isEmpty())
                     || (Config.enableDramaTop && topBar != null)
-                    || (Config.enableDramaBottom && !bottomList.isEmpty())
                     || (Config.enableDramaRt && rightTop != null)
                     || (Config.enableDramaLt && leftTop != null);
         } else {
@@ -1151,11 +1165,14 @@ public final class DouyinHook {
                     || (Config.enableDouyinRt && rightTop != null)
                     || (Config.enableDouyinLt && leftTop != null)
                     // 只开「直播间隐藏」时也必须能进入隐藏窗口，否则该开关完全不生效。
-                    // 用强特征判断，避免普通视频页被误判后无端隐藏。
-                    || (Config.enableLive && isLiveStrong());
+                    // v2.7：与 hideEnabled 共用 rescan 提交的唯一判定，不再另用 isLiveStrong。
+                    || (Config.enableLive && liveDetected);
         }
 
-        if (!isScreenOn() || !anyEnabled) {
+        // v2.7：总开关（防烧屏保护）是总闸。SystemUI 侧 Controller 早已遵守，
+        // 但抖音/红果进程此前漏了这一条 —— 总开关关闭后，视频页各区域仍会照常周期隐藏。
+        // 与 Controller.tick() 的暂停条件保持一致。
+        if (!Config.enableStatus || !isScreenOn() || !anyEnabled) {
             if (hidden) {
                 showAll();
                 hidden = false;
@@ -1200,25 +1217,20 @@ public final class DouyinHook {
             showAll();
             return;
         }
-        // 直播间专用：页面结构与普通视频页完全不同，走直播三区 + 右上角
-        if (isLive()) {
-            if (!Config.enableLive) {
-                showAll();
-                return;
-            }
-            for (View v : liveTopList) {
-                transparentDeep(v, "livetop");
-            }
-            for (View v : liveBottomList) {
-                transparentDeep(v, "livebottom");
-            }
-            for (View v : liveRightList) {
-                transparentDeep(v, "liveright");
-            }
-            if (rightTop != null) {
-                transparentDeep(rightTop, "righttop");
-            }
-            return;
+        // v2.7：直播三区只受「直播间隐藏」开关控制，独立判断，不再短路掉普通区域。
+        // 旧版一旦 isLive() 命中，enableLive=false 就 showAll() 全盘恢复并 return，
+        // 会把用户已开启的顶部/右侧等普通区域开关一起否决；判定又依赖 rightTop 的
+        // RoundCornerFrameLayout（普通视频页也可能命中），误判后整个区域隐藏失效。
+        // 现在两套开关彻底解耦：直播三区按 enableLive 隐藏/恢复，普通区域照常按各自开关。
+        final boolean liveHide = liveDetected && !isDrama && Config.enableLive;
+        for (View v : liveTopList) {
+            if (liveHide) transparentDeep(v, "livetop"); else showDeep(v);
+        }
+        for (View v : liveBottomList) {
+            if (liveHide) transparentDeep(v, "livebottom"); else showDeep(v);
+        }
+        for (View v : liveRightList) {
+            if (liveHide) transparentDeep(v, "liveright"); else showDeep(v);
         }
         // 红果短剧用红果独立开关，抖音用抖音开关
         boolean dLike = isDrama ? Config.enableDramaLike : Config.enableDouyinLike;
@@ -1256,7 +1268,9 @@ public final class DouyinHook {
                 showDeep(v);
             }
         }
-        if (dRt) {
+        // 直播间右上角（RoundCornerFrameLayout 强特征）原本无条件隐藏；解耦后由
+        // 「直播间隐藏」或「右上角」任一开关控制，两个开关互不否决。
+        if (dRt || liveHide) {
             if (rightTop != null) {
                 transparentDeep(rightTop, "righttop");
             }
@@ -1363,10 +1377,18 @@ public final class DouyinHook {
                     case MotionEvent.ACTION_DOWN:
                         down[0] = event.getRawX();
                         down[1] = event.getRawY();
-                        android.widget.FrameLayout.LayoutParams sp =
-                                (android.widget.FrameLayout.LayoutParams) v.getLayoutParams();
-                        start[0] = sp.leftMargin;
-                        start[1] = sp.topMargin;
+                        // v2.5：decor 不一定是 FrameLayout，旧版在 OnTouch 回调里
+                        // 直接强转会崩抖音（不在 ensureBall 的 try 内）。
+                        ViewGroup.LayoutParams lp = v.getLayoutParams();
+                        if (lp instanceof android.widget.FrameLayout.LayoutParams) {
+                            android.widget.FrameLayout.LayoutParams sp =
+                                    (android.widget.FrameLayout.LayoutParams) lp;
+                            start[0] = sp.leftMargin;
+                            start[1] = sp.topMargin;
+                        } else {
+                            start[0] = 0;
+                            start[1] = 0;
+                        }
                         dragged[0] = false;
                         return true;
                     case MotionEvent.ACTION_MOVE:

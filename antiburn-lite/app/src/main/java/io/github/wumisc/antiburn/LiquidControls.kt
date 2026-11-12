@@ -45,9 +45,10 @@ fun LiquidToggle(
     onCheckedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val light = !isSystemInDarkTheme()
-    val accent = if (light) Color(0xFF34C759) else Color(0xFF30D158)
-    val trackColor = if (light) Color(0xFF787878).copy(0.2f) else Color(0xFF787880).copy(0.36f)
+    val dark = isSystemInDarkTheme()
+    // v2.6：统一强调色。旧版开关是 iOS 绿、滑条是亮蓝，加上主题紫/粉，观感割裂。
+    val accent = UiPalette.accent(dark)
+    val trackColor = if (!dark) Color(0xFF787878).copy(0.2f) else Color(0xFF787880).copy(0.36f)
 
     val density = LocalDensity.current
     val dragWidth = with(density) { 20f.dp.toPx() }
@@ -98,7 +99,12 @@ fun LiquidToggle(
                                 if ((target == 1f) != currentChecked) currentOnChange(target == 1f)
                             }
                         },
-                        onDragCancel = { scope.launch { press.animateTo(0f, spring()) } },
+                        onDragCancel = { scope.launch {
+                            press.animateTo(0f, spring())
+                            // v2.5：拖拽取消必须把进度复位到磁盘真值，否则界面停在
+                            // 拖到的位置而 conf 里还是旧值，看起来「开关又回去了」。
+                            fraction.animateTo(if (currentChecked) 1f else 0f, spring())
+                        } },
                         onHorizontalDrag = { change, drag ->
                             change.consume()
                             scope.launch { fraction.snapTo((fraction.value + drag / dragWidth).coerceIn(0f, 1f)) }
@@ -144,9 +150,10 @@ fun LiquidSlider(
     valueRange: ClosedFloatingPointRange<Float>,
     modifier: Modifier = Modifier,
 ) {
-    val light = !isSystemInDarkTheme()
-    val accent = if (light) Color(0xFF0088FF) else Color(0xFF0091FF)
-    val trackColor = if (light) Color(0xFF787878).copy(0.2f) else Color(0xFF787880).copy(0.36f)
+    val dark = isSystemInDarkTheme()
+    // v2.6：滑条与开关共用同一强调色，不再一处蓝一处绿。
+    val accent = UiPalette.accent(dark)
+    val trackColor = if (!dark) Color(0xFF787878).copy(0.2f) else Color(0xFF787880).copy(0.36f)
 
     val density = LocalDensity.current
     val thumbWidth = with(density) { 40f.dp.toPx() }
@@ -210,7 +217,10 @@ fun LiquidSlider(
                     detectHorizontalDragGestures(
                         onDragStart = { scope.launch { press.animateTo(1f, spring()) } },
                         onDragEnd = { scope.launch { press.animateTo(0f, spring()) } },
-                        onDragCancel = { scope.launch { press.animateTo(0f, spring()) } },
+                        onDragCancel = { scope.launch {
+                            press.animateTo(0f, spring())
+                            progress.animateTo(currentFrac, spring())
+                        } },
                         onHorizontalDrag = { change, drag ->
                             change.consume()
                             scope.launch {
