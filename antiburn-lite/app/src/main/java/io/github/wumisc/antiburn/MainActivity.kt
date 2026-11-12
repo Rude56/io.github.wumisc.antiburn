@@ -148,6 +148,20 @@ data class AbState(
     val whiteList: String = "",
     /** 黑名单内容：只有名单内应用才干预（为空时退回全部干预） */
     val blackList: String = "",
+    val poemLocal: String = PoemLibrary.defaultsJson(),
+    val poemOnline: String = "[]",
+    val poemDeletedOnline: String = "",
+    val poemOrder: String = PoemLibrary.ORDER_SEQUENTIAL,
+    val poemClockSec: Int = 10,
+    val poemSpeedPx: Int = 120,
+    val poemDurationExpr: String = PoemMotion.DEFAULT_DURATION_EXPR,
+    val poemPositionExpr: String = PoemMotion.DEFAULT_POSITION_EXPR,
+    val poemShowAuthor: Boolean = true,
+    val poemShowSource: Boolean = true,
+    val poemSkipCutout: Boolean = true,
+    val poemBob: Boolean = false,
+    val poemLandscapePause: Boolean = true,
+    val poemSeed: Long = 20261112L,
 ) {
     /** 当前模式对应的那份名单文本，UI 的输入框与卡片都读它 */
     val activeList: String
@@ -212,6 +226,20 @@ private val AbStateSaver = listSaver(
                 uiStyle = Str(22, "aosp"),
                 listMode = ConfStore.normMode(Str(23)),
                 blackList = Str(24),
+                poemLocal = Str(25, PoemLibrary.defaultsJson()),
+                poemOnline = Str(26, "[]"),
+                poemDeletedOnline = Str(27, ""),
+                poemOrder = PoemLibrary.normMode(Str(28, PoemLibrary.ORDER_SEQUENTIAL)),
+                poemClockSec = Intv(29, 10),
+                poemSpeedPx = Intv(30, 120),
+                poemDurationExpr = Str(31, PoemMotion.DEFAULT_DURATION_EXPR),
+                poemPositionExpr = Str(32, PoemMotion.DEFAULT_POSITION_EXPR),
+                poemShowAuthor = Bool(33, true),
+                poemShowSource = Bool(34, true),
+                poemSkipCutout = Bool(35, true),
+                poemBob = Bool(36),
+                poemLandscapePause = Bool(37, true),
+                poemSeed = (l.getOrNull(38) as? Long) ?: 20261112L,
             )
         }
     },
@@ -241,15 +269,22 @@ object AbConf {
             map[t.substring(0, idx).trim()] = t.substring(idx + 1).trim()
         }
         val lists = ConfStore.readLists(conf)
+        val legacyPoems = ConfStore.decodeValue(map["custom_poems"] ?: "")
+        val localPoems = when {
+            map.containsKey("poem_local") -> ConfStore.decodeValue(map["poem_local"] ?: "")
+            legacyPoems.isNotBlank() -> PoemLibrary.migrateLegacy(legacyPoems)
+            else -> PoemLibrary.defaultsJson()
+        }
+        val onlinePoems = ConfStore.decodeValue(map["poem_online"] ?: "[]")
         return AbState(
             enableStatus = b(map["enable_status"], true),
             enableNav = b(map["enable_navigation"]),
             enableShift = b(map["enable_shift"], true),
             enableIcon = b(map["enable_icon"]),
             uiStyle = normUiStyle(map["ui_style"]),
-            // 诗句功能已下线（Hook 侧实现同步移除）：界面无入口、消费端已删，
-            // 这里固定 false，避免老配置里的 enable_poem=1 被读进来再写回去。
-            enablePoem = false,
+            // v2.6：诗句虫重新提供可见入口与 Hook 消费，读取用户开关。
+            // 保留原字段索引，老 Bundle 仍可恢复。
+            enablePoem = b(map["enable_poem"]),
             enableBall = b(map["enable_ball"]),
             enableLog = b(map["enable_log"]),
             enableDouyinTop = b(map["enable_douyin_top"]),
@@ -271,6 +306,20 @@ object AbConf {
             listMode = lists.mode,
             whiteList = lists.white.joinToString(","),
             blackList = lists.black.joinToString(","),
+            poemLocal = PoemLibrary.ensureLocal(localPoems),
+            poemOnline = onlinePoems,
+            poemDeletedOnline = map["poem_deleted_online"] ?: "",
+            poemOrder = PoemLibrary.normMode(map["poem_order"]),
+            poemClockSec = i(map["poem_clock_sec"], 10).coerceIn(0, 600),
+            poemSpeedPx = i(map["poem_speed_px"], 120).coerceIn(20, 600),
+            poemDurationExpr = ConfStore.decodeValue(map["poem_duration_expr"] ?: PoemMotion.DEFAULT_DURATION_EXPR),
+            poemPositionExpr = ConfStore.decodeValue(map["poem_position_expr"] ?: PoemMotion.DEFAULT_POSITION_EXPR),
+            poemShowAuthor = b(map["poem_show_author"], true),
+            poemShowSource = b(map["poem_show_source"], true),
+            poemSkipCutout = b(map["poem_skip_cutout"], true),
+            poemBob = b(map["poem_bob"]),
+            poemLandscapePause = b(map["poem_landscape_pause"], true),
+            poemSeed = map["poem_seed"]?.trim()?.toLongOrNull() ?: 20261112L,
         )
     }
 
@@ -320,6 +369,20 @@ object AbConf {
         lines["enable_drama_left_top"] = if (s.enableDramaLt) "1" else "0"
         lines["hide_duration"] = s.hideSec.coerceIn(5, 3600).toString()
         lines["show_duration"] = s.showSec.coerceIn(1, 3600).toString()
+        lines["poem_local"] = ConfStore.encodeValue(PoemLibrary.ensureLocal(s.poemLocal))
+        lines["poem_online"] = ConfStore.encodeValue(s.poemOnline)
+        lines["poem_deleted_online"] = s.poemDeletedOnline
+        lines["poem_order"] = PoemLibrary.normMode(s.poemOrder)
+        lines["poem_clock_sec"] = s.poemClockSec.coerceIn(0, 600).toString()
+        lines["poem_speed_px"] = s.poemSpeedPx.coerceIn(20, 600).toString()
+        lines["poem_duration_expr"] = ConfStore.encodeValue(s.poemDurationExpr)
+        lines["poem_position_expr"] = ConfStore.encodeValue(s.poemPositionExpr)
+        lines["poem_show_author"] = if (s.poemShowAuthor) "1" else "0"
+        lines["poem_show_source"] = if (s.poemShowSource) "1" else "0"
+        lines["poem_skip_cutout"] = if (s.poemSkipCutout) "1" else "0"
+        lines["poem_bob"] = if (s.poemBob) "1" else "0"
+        lines["poem_landscape_pause"] = if (s.poemLandscapePause) "1" else "0"
+        lines["poem_seed"] = s.poemSeed.toString()
         // 多行文本必须编码成单行，否则后面的 key 会被挤成非法行、配置解析错乱
         lines["custom_poems"] = ConfStore.encodeValue(s.customPoems)
         lines["list_mode"] = s.listMode
@@ -378,6 +441,20 @@ object AbConf {
         putB("enable_drama_left_top", old.enableDramaLt, new.enableDramaLt)
         if (old.hideSec != new.hideSec) m["hide_duration"] = new.hideSec.coerceIn(5, 3600).toString()
         if (old.showSec != new.showSec) m["show_duration"] = new.showSec.coerceIn(1, 3600).toString()
+        if (old.poemLocal != new.poemLocal) m["poem_local"] = ConfStore.encodeValue(PoemLibrary.ensureLocal(new.poemLocal))
+        if (old.poemOnline != new.poemOnline) m["poem_online"] = ConfStore.encodeValue(new.poemOnline)
+        if (old.poemDeletedOnline != new.poemDeletedOnline) m["poem_deleted_online"] = new.poemDeletedOnline
+        if (old.poemOrder != new.poemOrder) m["poem_order"] = PoemLibrary.normMode(new.poemOrder)
+        if (old.poemClockSec != new.poemClockSec) m["poem_clock_sec"] = new.poemClockSec.coerceIn(0, 600).toString()
+        if (old.poemSpeedPx != new.poemSpeedPx) m["poem_speed_px"] = new.poemSpeedPx.coerceIn(20, 600).toString()
+        if (old.poemDurationExpr != new.poemDurationExpr) m["poem_duration_expr"] = ConfStore.encodeValue(new.poemDurationExpr)
+        if (old.poemPositionExpr != new.poemPositionExpr) m["poem_position_expr"] = ConfStore.encodeValue(new.poemPositionExpr)
+        putB("poem_show_author", old.poemShowAuthor, new.poemShowAuthor)
+        putB("poem_show_source", old.poemShowSource, new.poemShowSource)
+        putB("poem_skip_cutout", old.poemSkipCutout, new.poemSkipCutout)
+        putB("poem_bob", old.poemBob, new.poemBob)
+        putB("poem_landscape_pause", old.poemLandscapePause, new.poemLandscapePause)
+        if (old.poemSeed != new.poemSeed) m["poem_seed"] = new.poemSeed.toString()
         if (old.customPoems != new.customPoems) {
             m["custom_poems"] = ConfStore.encodeValue(new.customPoems)
         }
