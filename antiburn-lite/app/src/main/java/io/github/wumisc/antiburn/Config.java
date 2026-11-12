@@ -57,6 +57,23 @@ public final class Config {
     public static volatile String uiStyle = "aosp";
     public static volatile int hideSec = 30;
     public static volatile int showSec = 10;
+
+    // v2.4 poem-worm runtime settings (global; poem metadata lives in JSON).
+    public static volatile String poemLocalJson = PoemLibrary.defaultsJson();
+    public static volatile String poemOnlineJson = "[]";
+    public static volatile String poemDeletedOnline = "";
+    public static volatile String poemOrder = PoemLibrary.ORDER_SEQUENTIAL;
+    public static volatile int poemClockSec = 10;
+    public static volatile int poemSpeedPx = 120;
+    public static volatile String poemDurationExpr = PoemMotion.DEFAULT_DURATION_EXPR;
+    public static volatile String poemPositionExpr = PoemMotion.DEFAULT_POSITION_EXPR;
+    public static volatile boolean poemShowAuthor = true;
+    public static volatile boolean poemShowSource = true;
+    public static volatile boolean poemSkipCutout = true;
+    public static volatile boolean poemBob = false;
+    public static volatile boolean poemLandscapePause = true;
+    public static volatile long poemSeed = 20261112L;
+    public static volatile java.util.List<PoemItem> poemPool = java.util.Collections.emptyList();
     /**
      * 当前模式真正生效的名单（v2.8 由旧字段 whitelist 改名而来）。
      *
@@ -588,6 +605,13 @@ public final class Config {
         String style = uiStyle;
         String custom = customPoems;
         int h = hideSec, s = showSec;
+        boolean pShowAuthor = poemShowAuthor, pShowSource = poemShowSource;
+        boolean pSkipCutout = poemSkipCutout, pBob = poemBob, pLandscape = poemLandscapePause;
+        String pOrder = poemOrder, pLocal = poemLocalJson, pOnline = poemOnlineJson;
+        String pDeleted = poemDeletedOnline, pDurationExpr = poemDurationExpr, pPositionExpr = poemPositionExpr;
+        int pClock = poemClockSec, pSpeed = poemSpeedPx;
+        long pSeed = poemSeed;
+        boolean pLocalPresent = false, pOnlinePresent = false;
         // v2.8：模式与两份名单都来自 conf 的独立键。缺 list_mode 的旧配置按 white
         // 解释，且 whitelist 缺键时回退旧别名 blacklist —— 与 v2.7 行为一致。
         boolean modePresent = false;
@@ -644,6 +668,22 @@ public final class Config {
                     break;
                 case "hide_duration": h = parseInt(v, h); break;
                 case "show_duration": s = parseInt(v, s); break;
+                case "poem_local": pLocalPresent = true; pLocal = ConfStore.decodeValue(v); break;
+                case "poem_online": pOnlinePresent = true; pOnline = ConfStore.decodeValue(v); break;
+                case "poem_deleted_online": pDeleted = v; break;
+                case "poem_order": pOrder = PoemLibrary.normMode(v); break;
+                case "poem_clock_sec": pClock = parseInt(v, pClock); break;
+                case "poem_speed_px": pSpeed = parseInt(v, pSpeed); break;
+                case "poem_duration_expr": pDurationExpr = ConfStore.decodeValue(v); break;
+                case "poem_position_expr": pPositionExpr = ConfStore.decodeValue(v); break;
+                case "poem_show_author": pShowAuthor = "1".equals(v); break;
+                case "poem_show_source": pShowSource = "1".equals(v); break;
+                case "poem_skip_cutout": pSkipCutout = "1".equals(v); break;
+                case "poem_bob": pBob = "1".equals(v); break;
+                case "poem_landscape_pause": pLandscape = "1".equals(v); break;
+                case "poem_seed":
+                    try { pSeed = Long.parseLong(v); } catch (Throwable ignored) {}
+                    break;
                 case "list_mode":
                     modePresent = true;
                     modeRaw = ConfStore.normMode(v);
@@ -680,6 +720,29 @@ public final class Config {
                     ? customDecoded + "\n" + orphan.toString()
                     : customDecoded;
         }
+
+        if (!pLocalPresent) {
+            pLocal = custom == null || custom.trim().isEmpty()
+                    ? PoemLibrary.ensureLocal(poemLocalJson)
+                    : PoemLibrary.migrateLegacy(custom);
+        }
+        poemLocalJson = PoemLibrary.ensureLocal(pLocal);
+        poemOnlineJson = pOnline == null ? "[]" : pOnline;
+        poemDeletedOnline = pDeleted == null ? "" : pDeleted;
+        poemOrder = PoemLibrary.normMode(pOrder);
+        poemClockSec = Math.min(600, Math.max(0, pClock));
+        poemSpeedPx = Math.min(600, Math.max(20, pSpeed));
+        poemDurationExpr = pDurationExpr == null || pDurationExpr.trim().isEmpty()
+                ? PoemMotion.DEFAULT_DURATION_EXPR : pDurationExpr;
+        poemPositionExpr = pPositionExpr == null || pPositionExpr.trim().isEmpty()
+                ? PoemMotion.DEFAULT_POSITION_EXPR : pPositionExpr;
+        poemShowAuthor = pShowAuthor;
+        poemShowSource = pShowSource;
+        poemSkipCutout = pSkipCutout;
+        poemBob = pBob;
+        poemLandscapePause = pLandscape;
+        poemSeed = pSeed;
+        poemPool = PoemLibrary.mergeEnabled(poemLocalJson, poemOnlineJson);
 
         enableStatus = es;
         enableNav = en;
@@ -798,3 +861,4 @@ public final class Config {
         }
     }
 }
+

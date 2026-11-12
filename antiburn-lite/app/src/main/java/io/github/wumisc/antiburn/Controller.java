@@ -528,6 +528,15 @@ public final class Controller {
         return "未知条件";
     }
 
+    private static boolean isLandscape() {
+        try {
+            return statusView != null && statusView.getResources().getConfiguration().orientation
+                    == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static boolean isScreenOn() {
         try {
             if (statusView == null) {
@@ -698,3 +707,4 @@ public final class Controller {
         return (p == null || p.isEmpty()) ? null : p;
     }
 }
+

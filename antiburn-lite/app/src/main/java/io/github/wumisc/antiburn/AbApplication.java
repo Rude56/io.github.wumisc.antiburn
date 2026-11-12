@@ -15,5 +15,8 @@ public final class AbApplication extends Application {
         // 旧版本（只写 /data/local/tmp）升级后没有应用内镜像，
         // 会导致 ConfigProvider 取不到配置、Hook 侧跑默认值。启动时后台补齐一次。
         ConfStore.migrateIfNeededAsync();
+        PoemOnlineClient.schedule(this);
     }
 }
+
+

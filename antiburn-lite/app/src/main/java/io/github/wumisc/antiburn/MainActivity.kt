@@ -10,6 +10,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -63,7 +65,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.platform.LocalContext
@@ -164,6 +168,9 @@ private val AbStateSaver = listSaver(
             s.enableDramaRt, s.enableDramaLt,
             s.hideSec, s.showSec, s.customPoems, s.whiteList,
             s.enableShift, s.enableIcon, s.uiStyle, s.listMode, s.blackList,
+            s.poemLocal, s.poemOnline, s.poemDeletedOnline, s.poemOrder, s.poemClockSec,
+            s.poemSpeedPx, s.poemDurationExpr, s.poemPositionExpr, s.poemShowAuthor,
+            s.poemShowSource, s.poemSkipCutout, s.poemBob, s.poemLandscapePause, s.poemSeed,
         )
     },
     restore = { l: List<Any> ->
@@ -1418,6 +1425,366 @@ private fun AboutPage(onOpen: (String) -> Unit, onOpenUrl: (String) -> Unit) {
     }
 }
 
+// ---- 古诗虫 ----
+private val POEM_ORDER_LABELS = listOf(
+    PoemLibrary.ORDER_SEQUENTIAL to "顺序",
+    PoemLibrary.ORDER_RANDOM to "随机",
+    PoemLibrary.ORDER_PSEUDO to "伪随机",
+    PoemLibrary.ORDER_AUTHOR to "同作者",
+)
+
+@Composable
+private fun PoemPage(
+    state: AbState,
+    onStateChange: ((AbState) -> AbState) -> Unit,
+    dark: Boolean,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var editorId by remember { mutableStateOf<String?>(null) }
+    var editorOpen by remember { mutableStateOf(false) }
+    var editText by remember { mutableStateOf("") }
+    var editAuthor by remember { mutableStateOf("") }
+    var editSource by remember { mutableStateOf("") }
+    var deleteLocal by remember { mutableStateOf<PoemItem?>(null) }
+    var deleteOnline by remember { mutableStateOf<PoemItem?>(null) }
+    var durationDraft by remember(state.poemDurationExpr) { mutableStateOf(state.poemDurationExpr) }
+    var positionDraft by remember(state.poemPositionExpr) { mutableStateOf(state.poemPositionExpr) }
+    var formulaError by remember { mutableStateOf("") }
+    var refreshing by remember { mutableStateOf(false) }
+
+    val localItems = PoemItem.listFromJson(state.poemLocal, PoemItem.ORIGIN_LOCAL)
+    val deletedIds = state.poemDeletedOnline.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    val onlineItems = PoemItem.listFromJson(state.poemOnline, PoemItem.ORIGIN_ONLINE)
+        .filter { it.id !in deletedIds }
+
+    fun saveLocal(items: List<PoemItem>) = onStateChange {
+        it.copy(poemLocal = PoemItem.listToJson(items))
+    }
+    fun saveOnline(items: List<PoemItem>) = onStateChange {
+        it.copy(poemOnline = PoemItem.listToJson(items))
+    }
+    fun openEditor(item: PoemItem?) {
+        editorId = item?.id
+        editText = item?.text ?: ""
+        editAuthor = item?.author ?: ""
+        editSource = item?.source ?: ""
+        editorOpen = true
+    }
+
+    Text("诗句横向爬过状态栏，播完恢复原生状态栏显示时间，再继续下一首。爬行和模块遮挡均按 30fps、低分配设计。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+    Spacer(Modifier.height(14.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = state.enablePoem,
+            onClick = { onStateChange { it.copy(enablePoem = !it.enablePoem) } },
+            label = { Text(if (state.enablePoem) "古诗虫已开启" else "古诗虫已关闭") },
+        )
+        FilterChip(
+            selected = state.poemShowAuthor,
+            onClick = { onStateChange { it.copy(poemShowAuthor = !it.poemShowAuthor) } },
+            label = { Text("作者") },
+        )
+        FilterChip(
+            selected = state.poemShowSource,
+            onClick = { onStateChange { it.copy(poemShowSource = !it.poemShowSource) } },
+            label = { Text("出处") },
+        )
+    }
+
+    Text("播放顺序", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+        color = UiPalette.ink(dark), modifier = Modifier.padding(top = 16.dp))
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        POEM_ORDER_LABELS.forEach { (id, label) ->
+            FilterChip(selected = state.poemOrder == id,
+                onClick = { onStateChange { it.copy(poemOrder = id) } },
+                label = { Text(label) })
+        }
+    }
+
+    Text("时间展示 ${state.poemClockSec} 秒", style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.Bold, color = UiPalette.ink(dark),
+        modifier = Modifier.padding(top = 16.dp))
+    LiquidSlider(
+        value = state.poemClockSec.toFloat(),
+        onValueChange = { onStateChange { it.copy(poemClockSec = it.roundToInt().coerceIn(0, 600)) } },
+        valueRange = 0f..600f,
+    )
+    Text("宽度越大显示越久；0 表示诗句结束后立刻进入下一首。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+    Text("基础速度 ${state.poemSpeedPx}px/s", style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.Bold, color = UiPalette.ink(dark),
+        modifier = Modifier.padding(top = 16.dp))
+    LiquidSlider(
+        value = state.poemSpeedPx.toFloat(),
+        onValueChange = { onStateChange { it.copy(poemSpeedPx = it.roundToInt().coerceIn(20, 600)) } },
+        valueRange = 20f..600f,
+    )
+
+    Text("时长表达式", style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold, color = UiPalette.ink(dark),
+        modifier = Modifier.padding(top = 16.dp))
+    OutlinedTextField(
+        value = durationDraft,
+        onValueChange = { durationDraft = it; formulaError = "" },
+        modifier = Modifier.fillMaxWidth(),
+        minLines = 2,
+        label = { Text("秒；变量 chars/speed/width/textWidth/padding") },
+    )
+    Text("位置曲线", style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold, color = UiPalette.ink(dark),
+        modifier = Modifier.padding(top = 12.dp))
+    OutlinedTextField(
+        value = positionDraft,
+        onValueChange = { positionDraft = it; formulaError = "" },
+        modifier = Modifier.fillMaxWidth(),
+        minLines = 2,
+        label = { Text("0..1；变量 p/t/duration/chars") },
+    )
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf("匀速" to "p", "缓入" to "p*p", "缓出" to "1-(1-p)*(1-p)",
+            "慢快慢" to "smoothstep(0,1,p)").forEach { (label, expr) ->
+            FilterChip(selected = positionDraft == expr,
+                onClick = { positionDraft = expr; formulaError = "" },
+                label = { Text(label) })
+        }
+    }
+    CurvePreview(positionDraft, dark)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Button(
+            onClick = {
+                try {
+                    PoemMotion.validate(durationDraft, false)
+                    PoemMotion.validate(positionDraft, true)
+                    onStateChange {
+                        it.copy(poemDurationExpr = durationDraft, poemPositionExpr = positionDraft)
+                    }
+                    formulaError = "公式已保存"
+                } catch (t: Throwable) {
+                    formulaError = t.message ?: "公式无效"
+                }
+            },
+            modifier = Modifier.weight(1f),
+        ) { Text("应用公式") }
+    }
+    if (formulaError.isNotEmpty()) {
+        Text(formulaError, style = MaterialTheme.typography.labelSmall,
+            color = if (formulaError == "公式已保存") UiPalette.accent(dark) else Color(0xFFD44A4A),
+            modifier = Modifier.padding(top = 4.dp))
+    }
+
+    Row(Modifier.fillMaxWidth().padding(top = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(selected = state.poemLandscapePause,
+            onClick = { onStateChange { it.copy(poemLandscapePause = !it.poemLandscapePause) } },
+            label = { Text("横屏暂停") })
+        FilterChip(selected = state.poemSkipCutout,
+            onClick = { onStateChange { it.copy(poemSkipCutout = !it.poemSkipCutout) } },
+            label = { Text("跳过挖孔") })
+        FilterChip(selected = state.poemBob,
+            onClick = { onStateChange { it.copy(poemBob = !it.poemBob) } },
+            label = { Text("上下浮动") })
+    }
+
+    Row(Modifier.fillMaxWidth().padding(top = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("本地诗句 · ${localItems.size}", style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold, color = UiPalette.ink(dark), modifier = Modifier.weight(1f))
+        TextButton(onClick = { openEditor(null) }) { Text("添加") }
+    }
+    localItems.forEachIndexed { index, item ->
+        PoemRow(item, dark,
+            onToggle = { checked -> saveLocal(localItems.map {
+                if (it.id == item.id) PoemItem(it.id, it.text, it.author, it.source, it.origin, checked) else it
+            }) },
+            onEdit = { openEditor(item) },
+            onDelete = { deleteLocal = item },
+            onUp = if (index > 0) ({ saveLocal(localItems.toMutableList().also {
+                val a = it[index - 1]; it[index - 1] = item; it[index] = a
+            }) }) else null,
+            onDown = if (index < localItems.lastIndex) ({ saveLocal(localItems.toMutableList().also {
+                val a = it[index + 1]; it[index + 1] = item; it[index] = a
+            }) }) else null,
+        )
+    }
+    if (localItems.isEmpty()) {
+        Text("本地诗库为空；空库会保持为空，不会自动恢复默认六首。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+
+    Row(Modifier.fillMaxWidth().padding(top = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("联网诗句 · ${onlineItems.size}", style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold, color = UiPalette.ink(dark), modifier = Modifier.weight(1f))
+        TextButton(onClick = {
+            if (!refreshing) {
+                refreshing = true
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) { PoemOnlineClient.refresh(context) }
+                    refreshing = false
+                    if (result != null) {
+                        val merged = PoemItem.listFromJson(result, PoemItem.ORIGIN_ONLINE)
+                        saveOnline(merged)
+                        Toast.makeText(context, "联网诗句已刷新", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "联网刷新失败，保留旧缓存", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }) { Text(if (refreshing) "刷新中…" else "刷新") }
+    }
+    onlineItems.forEach { item ->
+        PoemRow(item, dark,
+            onToggle = { checked -> saveOnline(onlineItems.map {
+                if (it.id == item.id) PoemItem(it.id, it.text, it.author, it.source, it.origin, checked) else it
+            }) },
+            onEdit = null,
+            onDelete = { deleteOnline = item },
+            onUp = null,
+            onDown = null,
+        )
+    }
+    if (onlineItems.isEmpty()) {
+        Text("尚无联网诗句；每日后台刷新一次，也可手动刷新。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+
+    if (editorOpen) {
+        AlertDialog(
+            onDismissRequest = { editorOpen = false },
+            title = { Text(if (editorId == null) "添加本地诗句" else "编辑本地诗句") },
+            text = {
+                Column {
+                    OutlinedTextField(editText, { editText = it; formulaError = "" },
+                        label = { Text("诗句，必填") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(editAuthor, { editAuthor = it },
+                        label = { Text("作者，可空") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(editSource, { editSource = it },
+                        label = { Text("出处，可空") }, modifier = Modifier.fillMaxWidth())
+                    if (formulaError.isNotEmpty()) {
+                        Text(formulaError, style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFD44A4A), modifier = Modifier.padding(top = 6.dp))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val text = editText.trim()
+                    if (text.isEmpty()) {
+                        formulaError = "诗句不能为空"
+                    } else if (PoemLibrary.duplicate(localItems, text, editAuthor.trim(), editSource.trim(), editorId ?: "")) {
+                        formulaError = "已有相同诗句"
+                    } else {
+                        val old = localItems.find { it.id == editorId }
+                        val item = PoemItem(editorId ?: "", text, editAuthor.trim(), editSource.trim(),
+                            PoemItem.ORIGIN_LOCAL, old?.enabled ?: true)
+                        val next = if (old == null) localItems + item
+                        else localItems.map { if (it.id == old.id) item else it }
+                        saveLocal(next)
+                        editorOpen = false
+                        formulaError = ""
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { editorOpen = false }) { Text("取消") } },
+        )
+    }
+
+    deleteLocal?.let { item ->
+        AlertDialog(
+            onDismissRequest = { deleteLocal = null },
+            title = { Text("删除诗句") },
+            text = { Text("确定删除“${item.text}”？删除后不会因升级自动恢复。") },
+            confirmButton = { TextButton(onClick = {
+                saveLocal(localItems.filter { it.id != item.id }); deleteLocal = null
+            }) { Text("删除") } },
+            dismissButton = { TextButton(onClick = { deleteLocal = null }) { Text("取消") } },
+        )
+    }
+    deleteOnline?.let { item ->
+        AlertDialog(
+            onDismissRequest = { deleteOnline = null },
+            title = { Text("移除联网诗句") },
+            text = { Text("后续刷新不会再次加入这条内容。") },
+            confirmButton = { TextButton(onClick = {
+                saveOnline(onlineItems.filter { it.id != item.id })
+                onStateChange {
+                    val ids = (deletedIds + item.id).joinToString(",")
+                    it.copy(poemDeletedOnline = ids)
+                }
+                deleteOnline = null
+            }) { Text("移除") } },
+            dismissButton = { TextButton(onClick = { deleteOnline = null }) { Text("取消") } },
+        )
+    }
+}
+
+@Composable
+private fun PoemRow(
+    item: PoemItem,
+    dark: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onEdit: (() -> Unit)?,
+    onDelete: () -> Unit,
+    onUp: (() -> Unit)?,
+    onDown: (() -> Unit)?,
+) {
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 5.dp),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(item.text, style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold, color = UiPalette.ink(dark))
+            val meta = listOf(item.author, item.source).filter { it.isNotEmpty() }.joinToString(" · ")
+            if (meta.isNotEmpty()) Text(meta, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FilterChip(selected = item.enabled, onClick = { onToggle(!item.enabled) },
+                    label = { Text(if (item.enabled) "启用" else "停用") })
+                if (onEdit != null) TextButton(onClick = onEdit) { Text("编辑") }
+                if (onUp != null) TextButton(onClick = onUp) { Text("↑") }
+                if (onDown != null) TextButton(onClick = onDown) { Text("↓") }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDelete) { Text("删除") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CurvePreview(expression: String, dark: Boolean) {
+    val samples = remember(expression) {
+        runCatching {
+            val vars = PoemMotion.Vars().apply {
+                speed = 120.0; width = 1080.0; textWidth = 480.0; padding = 8.0
+                chars = 24.0; duration = 10.0
+            }
+            PoemMotion.sample(PoemMotion.compile(expression), 65, vars)
+        }.getOrNull()
+    }
+    Canvas(Modifier.fillMaxWidth().height(96.dp).padding(vertical = 6.dp)) {
+        val line = Color.Gray.copy(alpha = 0.25f)
+        drawLine(line, androidx.compose.ui.geometry.Offset(0f, size.height), androidx.compose.ui.geometry.Offset(size.width, 0f), 1f)
+        if (samples != null) {
+            val path = Path()
+            samples.forEachIndexed { index, value ->
+                val x = if (samples.size <= 1) 0f else size.width * index / (samples.size - 1f)
+                val y = size.height * (1f - value.coerceIn(0f, 1f))
+                if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            drawPath(path, UiPalette.accent(dark), style = Stroke(width = 3f))
+        }
+    }
+}
 // ---- 二级菜单容器 ----
 @Composable
 private fun SubPageHost(
@@ -1466,6 +1833,7 @@ private fun SubPageHost(
                 "donate" -> DonatePage(dark)
                 "credit" -> CreditPage(dark, onOpenUrl)
                 "cycle" -> CyclePage(state, onStateChange, dark)
+                "poem" -> PoemPage(state, onStateChange, dark)
             }
         }
     }
@@ -1677,3 +2045,9 @@ private fun navIcon(name: String, pathData: String): ImageVector =
 private const val PATH_HOME = "M10,20v-6h4v6h5v-8h3L12,3 2,12h3v8z"
 private const val PATH_FEATURES = "M3,13h8L11,3 3,3v10zM3,21h8v-6L3,15v6zM13,21h8L21,11h-8v10zM13,3v6h8L21,3h-8z"
 private const val PATH_ABOUT = "M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM13,17h-2v-6h2v6zM13,9h-2L11,7h2v2z"
+
+
+
+
+
+

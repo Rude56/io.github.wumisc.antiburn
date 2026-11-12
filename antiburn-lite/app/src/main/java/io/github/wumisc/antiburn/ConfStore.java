@@ -193,6 +193,20 @@ public final class ConfStore {
         sb.append("enable_drama_left_top=0\n");
         sb.append("hide_duration=30\n");
         sb.append("show_duration=10\n");
+        sb.append("poem_local=").append(encodeValue(PoemLibrary.defaultsJson())).append('\n');
+        sb.append("poem_online=[]\n");
+        sb.append("poem_deleted_online=\n");
+        sb.append("poem_order=sequential\n");
+        sb.append("poem_clock_sec=10\n");
+        sb.append("poem_speed_px=120\n");
+        sb.append("poem_duration_expr=").append(encodeValue(PoemMotion.DEFAULT_DURATION_EXPR)).append('\n');
+        sb.append("poem_position_expr=").append(encodeValue(PoemMotion.DEFAULT_POSITION_EXPR)).append('\n');
+        sb.append("poem_show_author=1\n");
+        sb.append("poem_show_source=1\n");
+        sb.append("poem_skip_cutout=1\n");
+        sb.append("poem_bob=0\n");
+        sb.append("poem_landscape_pause=1\n");
+        sb.append("poem_seed=20261112\n");
         // v2.8：名单分黑白两种解释，模式与两份名单都是独立键。
         // 缺 list_mode 的旧配置按 white 解释，升级后行为不变。
         sb.append(KEY_MODE).append('=').append(MODE_WHITE).append('\n');
@@ -1062,3 +1076,4 @@ public final class ConfStore {
         return null;
     }
 }
+
