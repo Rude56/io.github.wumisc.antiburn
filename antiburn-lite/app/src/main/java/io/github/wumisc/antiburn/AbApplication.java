@@ -18,5 +18,3 @@ public final class AbApplication extends Application {
         PoemOnlineClient.schedule(this);
     }
 }
-
-

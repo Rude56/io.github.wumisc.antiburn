@@ -22,7 +22,9 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 
 /** Stateful poem crawl / clock-hold controller running inside SystemUI. */
@@ -30,6 +32,11 @@ final class PoemRuntime {
     private static final int TARGET_FRAME_NS = 1_000_000_000 / 30;
     private static final int LUT_SIZE = 257;
     private static final Handler handler = new Handler(Looper.getMainLooper());
+    private static final Map<String, Prepared> PREPARED = new LinkedHashMap<String, Prepared>(16, 0.75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Prepared> eldest) {
+            return size() > 64;
+        }
+    };
 
     private static View statusView;
     private static View navView;
@@ -98,7 +105,8 @@ final class PoemRuntime {
         try {
             WindowManager.LayoutParams lp = overlay.layoutParams(statusView);
             wm = (WindowManager) statusView.getContext().getSystemService(Context.WINDOW_SERVICE);
-            if (wm != null) wm.addView(overlay, lp);
+            if (wm == null) { stop(); return; }
+            wm.addView(overlay, lp);
         } catch (Throwable t) {
             XposedInit.diag("POEM overlay add failed: " + t);
             stop();
@@ -172,6 +180,19 @@ final class PoemRuntime {
         int[] origin = new int[2];
         statusView.getLocationOnScreen(origin);
         collectModules(statusView, origin, 0);
+        if (modules.isEmpty() && statusView instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) statusView;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View child = g.getChildAt(i);
+                if (child.getVisibility() != View.VISIBLE || child.getAlpha() <= 0f
+                        || child.getWidth() < 2 || child.getHeight() < 2) continue;
+                int[] loc = new int[2];
+                child.getLocationOnScreen(loc);
+                int l = loc[0] - origin[0];
+                int t = loc[1] - origin[1];
+                modules.add(new Module(child, l, t, l + child.getWidth(), t + child.getHeight(), child.getAlpha()));
+            }
+        }
     }
 
     private static void collectModules(View v, int[] origin, int depth) {
@@ -203,8 +224,19 @@ final class PoemRuntime {
     private static void restoreModules() {
         for (int i = 0; i < modules.size(); i++) {
             Module m = modules.get(i);
-            if (m.occluded || m.view.getAlpha() != m.originalAlpha) m.view.setAlpha(m.originalAlpha);
+            if (m.occluded) m.view.setAlpha(m.originalAlpha);
             m.occluded = false;
+        }
+    }
+
+    private static final class Prepared {
+        final float textWidth;
+        final long durationNs;
+        final float[] lut;
+        final boolean customCurve;
+        Prepared(float textWidth, long durationNs, float[] lut, boolean customCurve) {
+            this.textWidth = textWidth; this.durationNs = durationNs;
+            this.lut = lut; this.customCurve = customCurve;
         }
     }
 
@@ -258,23 +290,37 @@ final class PoemRuntime {
             screenW = status.getWidth() > 0 ? status.getWidth()
                     : getResources().getDisplayMetrics().widthPixels;
             screenH = status.getHeight() > 0 ? status.getHeight() : (int) (28 * getResources().getDisplayMetrics().density);
-            textW = paint.measureText(text);
-            PoemMotion.Vars vars = new PoemMotion.Vars();
-            vars.speed = speed; vars.width = screenW; vars.textWidth = textW; vars.padding = 8;
-            vars.chars = text.codePointCount(0, text.length()); vars.p = 0;
-            try {
-                PoemMotion.Compiled duration = PoemMotion.compile(durationExpr);
-                double valueSeconds = duration.eval(vars);
-                if (!Double.isFinite(valueSeconds)) valueSeconds = (screenW + textW) / Math.max(1, speed);
-                durationNs = (long) (Math.max(1, Math.min(120, valueSeconds)) * 1_000_000_000L);
-            } catch (Throwable ignored) {
-                durationNs = (long) (((screenW + textW + 16f) / Math.max(1, speed)) * 1_000_000_000L);
+            String key = text + "|" + screenW + "|" + paint.getTextSize() + "|" + speed
+                    + "|" + durationExpr + "|" + positionExpr;
+            Prepared prepared = PREPARED.get(key);
+            if (prepared == null) {
+                float measured = paint.measureText(text);
+                PoemMotion.Vars vars = new PoemMotion.Vars();
+                vars.speed = speed; vars.width = screenW; vars.textWidth = measured; vars.padding = 8;
+                vars.chars = text.codePointCount(0, text.length()); vars.p = 0;
+                long durationValue;
+                try {
+                    PoemMotion.Compiled duration = PoemMotion.compile(durationExpr);
+                    double valueSeconds = duration.eval(vars);
+                    if (!Double.isFinite(valueSeconds)) valueSeconds = (screenW + measured) / Math.max(1, speed);
+                    durationValue = (long) (Math.max(1, Math.min(120, valueSeconds)) * 1_000_000_000L);
+                } catch (Throwable ignored) {
+                    durationValue = (long) (((screenW + measured + 16f) / Math.max(1, speed)) * 1_000_000_000L);
+                }
+                vars.duration = durationValue / 1_000_000_000d;
+                float[] table = null;
+                if (customCurve) {
+                    try { table = PoemMotion.sample(PoemMotion.compile(positionExpr), LUT_SIZE, vars); }
+                    catch (Throwable ignored) { table = null; }
+                }
+                prepared = new Prepared(measured, durationValue, table,
+                        table != null && customCurve);
+                PREPARED.put(key, prepared);
             }
-            vars.duration = durationNs / 1_000_000_000d;
-            if (customCurve) {
-                try { lut = PoemMotion.sample(PoemMotion.compile(positionExpr), LUT_SIZE, vars); }
-                catch (Throwable ignored) { lut = null; customCurve = false; }
-            } else lut = null;
+            textW = prepared.textWidth;
+            durationNs = prepared.durationNs;
+            lut = prepared.lut;
+            customCurve = prepared.customCurve;
             loadCutouts(status);
             loadTextColor(status);
             startNs = nextFrameNs = 0;
@@ -400,4 +446,3 @@ final class PoemRuntime {
         }
     }
 }
-

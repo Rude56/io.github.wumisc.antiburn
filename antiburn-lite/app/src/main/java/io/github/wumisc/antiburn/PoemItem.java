@@ -19,6 +19,7 @@ public final class PoemItem {
     public final String source;
     public final String origin;
     public final boolean enabled;
+    public final int charCount;
 
     public PoemItem(String id, String text, String author, String source,
                     String origin, boolean enabled) {
@@ -28,6 +29,7 @@ public final class PoemItem {
         this.source = source == null ? "" : source.trim();
         this.origin = ORIGIN_ONLINE.equals(origin) ? ORIGIN_ONLINE : ORIGIN_LOCAL;
         this.enabled = enabled;
+        this.charCount = this.text.codePointCount(0, this.text.length());
     }
 
     public PoemItem withEnabled(boolean value) {
@@ -53,6 +55,7 @@ public final class PoemItem {
         o.put("source", source);
         o.put("origin", origin);
         o.put("enabled", enabled);
+        o.put("chars", charCount);
         return o;
     }
 

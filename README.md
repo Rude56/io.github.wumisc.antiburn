@@ -1,11 +1,11 @@
 # 防止烧屏（Antiburn）
 
-防 OLED 烧屏的 LSPosed 模块：周期性透明化固定 UI（不点亮像素、保留触摸），支持状态栏 / 导航栏 / 抖音 / 红果分区防烧屏、黑白名单、像素偏移、悬浮球与快捷磁贴。
+防 OLED 烧屏的 LSPosed 模块：周期性透明化固定 UI（不点亮像素、保留触摸），支持状态栏 / 导航栏 / 抖音 / 红果分区防烧屏、古诗虫与时间交替、黑白名单、像素偏移、悬浮球与快捷磁贴。
 
-**当前版本** v2.5.2（versionCode 22）｜包名 `io.github.wumisc.antiburn`｜作者 @酷安锦无名
+**当前版本** v2.6.0（versionCode 23）｜包名 `io.github.wumisc.antiburn`｜作者 @酷安锦无名
 
 > 版本号自 v2.5.2 起按「主版本.功能版.修补版」对齐发布线，2.6—2.9.x 为开发期迭代号，
-> 相关功能均已并入本版。versionCode 始终单调递增（当前 22），可直接覆盖安装。
+> 相关功能均已并入本版。versionCode 始终单调递增（当前 23），可直接覆盖安装。
 
 ## 功能特性
 
@@ -22,6 +22,7 @@
   - 用选择器勾选，也可直接填包名（中英文逗号、分号均可作分隔符）
 - **界面适配**：按厂商标注 UI 形态（HyperOS / MagicOS / ColorOS / OriginOS / HarmonyOS / AOSP），模块据此避让中置胶囊与导航栏，避免误隐藏灵动岛、原子岛
 - **左右滑动 + 液态玻璃导航栏**：三页横向翻页，底部导航指示器随翻页进度逐帧跟随，支持拖拽切换
+- **古诗虫**：纯文字从状态栏右侧向左爬行，按最小状态栏模块逐个透明；播完恢复原生状态栏显示时间，再继续下一首。支持本地/联网诗库、四种播放顺序、作者/出处开关、自定义时长与位置公式、挖孔跳过、上下浮动、横屏暂停
 - **悬浮球**：屏幕右侧小球，点击一键切换隐藏控件显示 / 消失，可拖动
 - **保存与生效**：底部保存条实时显示「✓ 所有改动已保存 / ● 有未保存的改动」、root 状态与保存结果；「保存设置」立即落盘、「重新读取」重新载入、「重启系统界面」一键让配置立刻生效
 
@@ -75,7 +76,7 @@ gradle assembleDebug        # 产物 app/build/outputs/apk/debug/app-debug.apk
 cd antiburn-lite
 gradle :app:compileDebugKotlin :app:compileDebugJavaWithJavac   # 先生成测试所需的 classes
 cd ..
-./antiburn-tests/run-all.sh                                      # 五套件全跑
+./antiburn-tests/run-all.sh                                      # 六套件全跑
 ```
 
 | 套件 | 覆盖内容 |
@@ -85,6 +86,7 @@ cd ..
 | `feature-audit-test` | 字段 ↔ 落盘双向一致、每个开关都有 Hook 消费与界面入口、磁贴不重复绑定、二级路由不断链 |
 | `ui-contrast-test` | WCAG 对比度（正文 ≥ 4.5:1）、深色模式文字亮度下限、强调色相统一在青绿区间 |
 | `confstore-test` | 模式归一、名单分隔符、旧配置迁移、多行值编解码往返 |
+| `poem-test` | 六首默认诗、显式空库、顺序/伪随机、表达式解析、LUT 采样与插值 |
 
 ## 目录结构
 
@@ -93,6 +95,9 @@ antiburn-lite/
 ├── app/src/main/java/io/github/wumisc/antiburn/   # 模块主体
 │   ├── XposedInit.java          # 入口，按进程分发
 │   ├── Controller.java          # SystemUI 侧：状态栏/导航栏周期透明 + 像素偏移调度
+│   ├── PoemRuntime.java         # 古诗虫状态机、30fps Overlay、最小模块遮挡与挖孔跳过
+│   ├── PoemLibrary.java         # 本地/联网诗库、四种播放顺序与默认六首
+│   ├── PoemMotion.java          # 安全公式解析与自定义位置 LUT
 │   ├── PixelShift.java          # 像素偏移引擎（状态栏/导航栏 item 微移）
 │   ├── DouyinHook.java          # 抖音 / 红果侧：五区隐藏 + 悬浮球 + 直播间
 │   ├── ConfStore.java           # 配置读写：应用内镜像 + root 原子写 + 重启 SystemUI
@@ -107,6 +112,14 @@ antiburn-lite/
 ```
 
 ## 更新日志
+
+**v2.6.0（2026-11-12）**
+- 新增古诗虫：诗句横向爬过状态栏，播完恢复原生状态栏显示时间，时间停留 0–600 秒
+- 状态栏按最小叶子视图逐个透明化，只遮挡诗句实际经过的模块；支持挖孔分段跳过与 ±1.5px 上下浮动
+- 本地/联网诗库分栏管理，默认六首；支持增删改、启停、排序、作者/出处开关与固定种子伪随机
+- 新增顺序、随机、伪随机、同作者四种播放模式；联网诗由 App 侧每日 WorkManager 刷新，SystemUI 不联网
+- 新增时长与位置表达式、曲线预览、257 点 LUT；爬行按 VSync 30fps，空闲与时间阶段停止动画回调
+- 基于官方 v2.5.2 合并 2.6–2.9.2 修复后重新引入诗词能力，保留可见入口、Hook 消费和测试审计
 
 **v2.5.2（2026-11-12）**
 - 修复：隐藏期滚动古诗的 Overlay 仍在运行，但界面入口自 v2.6 起已删除，曾开启过的用户既关不掉也看不到开关。现移除 `Controller` 内的诗词实现、`PoemScrollView` 与 `PoemProvider`（-8.5 KB 代码），App 侧固定写 `enable_poem=0`，老配置的 `1` 在下次保存时自动清零

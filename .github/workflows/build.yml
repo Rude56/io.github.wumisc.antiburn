@@ -69,6 +69,11 @@ jobs:
           set -o pipefail
           gradle assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/build-full-log.txt"
 
+      - name: Run JVM tests
+        run: |
+          chmod +x antiburn-tests/run-all.sh
+          ./antiburn-tests/run-all.sh
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -112,6 +117,3 @@ jobs:
           git add "$LOG"
           git commit -m "Build failure log for run ${{ github.run_number }}"
           git push || true
-
-
-

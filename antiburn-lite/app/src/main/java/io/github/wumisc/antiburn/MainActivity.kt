@@ -1452,6 +1452,8 @@ private fun PoemPage(
     var positionDraft by remember(state.poemPositionExpr) { mutableStateOf(state.poemPositionExpr) }
     var formulaError by remember { mutableStateOf("") }
     var refreshing by remember { mutableStateOf(false) }
+    var clockDraft by remember(state.poemClockSec) { mutableIntStateOf(state.poemClockSec) }
+    var speedDraft by remember(state.poemSpeedPx) { mutableIntStateOf(state.poemSpeedPx) }
 
     val localItems = PoemItem.listFromJson(state.poemLocal, PoemItem.ORIGIN_LOCAL)
     val deletedIds = state.poemDeletedOnline.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
@@ -1506,26 +1508,30 @@ private fun PoemPage(
         }
     }
 
-    Text("时间展示 ${state.poemClockSec} 秒", style = MaterialTheme.typography.titleMedium,
+    Text("时间展示 $clockDraft 秒", style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.Bold, color = UiPalette.ink(dark),
         modifier = Modifier.padding(top = 16.dp))
     LiquidSlider(
-        value = state.poemClockSec.toFloat(),
-        onValueChange = { onStateChange { it.copy(poemClockSec = it.roundToInt().coerceIn(0, 600)) } },
+        value = clockDraft.toFloat(),
+        onValueChange = { clockDraft = it.roundToInt().coerceIn(0, 600) },
         valueRange = 0f..600f,
     )
     Text("宽度越大显示越久；0 表示诗句结束后立刻进入下一首。",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-    Text("基础速度 ${state.poemSpeedPx}px/s", style = MaterialTheme.typography.titleMedium,
+    Text("基础速度 ${speedDraft}px/s", style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.Bold, color = UiPalette.ink(dark),
         modifier = Modifier.padding(top = 16.dp))
     LiquidSlider(
-        value = state.poemSpeedPx.toFloat(),
-        onValueChange = { onStateChange { it.copy(poemSpeedPx = it.roundToInt().coerceIn(20, 600)) } },
+        value = speedDraft.toFloat(),
+        onValueChange = { speedDraft = it.roundToInt().coerceIn(20, 600) },
         valueRange = 20f..600f,
     )
+    TextButton(
+        onClick = { onStateChange { it.copy(poemClockSec = clockDraft, poemSpeedPx = speedDraft) } },
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text(if (clockDraft != state.poemClockSec || speedDraft != state.poemSpeedPx) "保存速度与时间" else "速度与时间已保存") }
 
     Text("时长表达式", style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.Bold, color = UiPalette.ink(dark),
@@ -1599,18 +1605,32 @@ private fun PoemPage(
         TextButton(onClick = { openEditor(null) }) { Text("添加") }
     }
     localItems.forEachIndexed { index, item ->
+        val moveUp: (() -> Unit)? = if (index > 0) {
+            {
+                saveLocal(localItems.toMutableList().also {
+                    val a = it[index - 1]
+                    it[index - 1] = item
+                    it[index] = a
+                })
+            }
+        } else null
+        val moveDown: (() -> Unit)? = if (index < localItems.lastIndex) {
+            {
+                saveLocal(localItems.toMutableList().also {
+                    val a = it[index + 1]
+                    it[index + 1] = item
+                    it[index] = a
+                })
+            }
+        } else null
         PoemRow(item, dark,
             onToggle = { checked -> saveLocal(localItems.map {
                 if (it.id == item.id) PoemItem(it.id, it.text, it.author, it.source, it.origin, checked) else it
             }) },
             onEdit = { openEditor(item) },
             onDelete = { deleteLocal = item },
-            onUp = if (index > 0) ({ saveLocal(localItems.toMutableList().also {
-                val a = it[index - 1]; it[index - 1] = item; it[index] = a
-            }) }) else null,
-            onDown = if (index < localItems.lastIndex) ({ saveLocal(localItems.toMutableList().also {
-                val a = it[index + 1]; it[index + 1] = item; it[index] = a
-            }) }) else null,
+            onUp = moveUp,
+            onDown = moveDown,
         )
     }
     if (localItems.isEmpty()) {
@@ -2045,9 +2065,3 @@ private fun navIcon(name: String, pathData: String): ImageVector =
 private const val PATH_HOME = "M10,20v-6h4v6h5v-8h3L12,3 2,12h3v8z"
 private const val PATH_FEATURES = "M3,13h8L11,3 3,3v10zM3,21h8v-6L3,15v6zM13,21h8L21,11h-8v10zM13,3v6h8L21,3h-8z"
 private const val PATH_ABOUT = "M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM13,17h-2v-6h2v6zM13,9h-2L11,7h2v2z"
-
-
-
-
-
-

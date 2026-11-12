@@ -51,7 +51,7 @@ public class FeatureAuditTest {
      * 该字段永久不会再有入口，因此同时登记在本表与 KNOWN_NO_HOOK。</p>
      */
     private static final Set<String> KNOWN_NO_UI =
-            Set.of("enableIcon", "enableDramaBottom", "enablePoem");
+            Set.of("enableIcon", "enableDramaBottom");
 
     /**
      * 已知「有界面/存储但无 Hook 消费」的字段。
@@ -62,7 +62,7 @@ public class FeatureAuditTest {
      * 界面在 v2.6 就没有入口了。字段与解析键保留只为向下兼容老 conf，
      * App 侧固定写 0，不会再把「关不掉的行为」带进新版本。</p>
      */
-    private static final Set<String> KNOWN_NO_HOOK = Set.of("enableIcon", "enablePoem");
+    private static final Set<String> KNOWN_NO_HOOK = Set.of("enableIcon");
 
     private static void check(boolean cond, String name, String detail) {
         if (cond) {
