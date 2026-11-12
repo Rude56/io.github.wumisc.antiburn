@@ -98,12 +98,17 @@ public final class PoemItem {
 
     public static String listToJson(List<PoemItem> items) {
         JSONArray arr = new JSONArray();
-        if (items != null) {
-            for (PoemItem p : items) {
-                if (p != null && !p.text.isEmpty()) {
-                    arr.put(p.toJson());
+        try {
+            if (items != null) {
+                for (PoemItem p : items) {
+                    if (p != null && !p.text.isEmpty()) {
+                        arr.put(p.toJson());
+                    }
                 }
             }
+        } catch (Throwable ignored) {
+            // Android's org.json declares JSONException on put(); valid poem records cannot
+            // trigger it, but SystemUI must never crash on a malformed third-party JSON shim.
         }
         return arr.toString();
     }

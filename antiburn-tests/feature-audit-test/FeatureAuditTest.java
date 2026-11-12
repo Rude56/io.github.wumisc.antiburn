@@ -47,8 +47,7 @@ public class FeatureAuditTest {
      * <p>enableDramaBottom：红果底部是「完整观看 / 选集」功能入口，必须常驻不隐藏，
      * 磁贴显式设为 enabled=false。字段保留是因为 Hook 侧 hideEnabled 仍按它分支。</p>
      *
-     * <p>enablePoem：界面入口在 v2.6 已按要求删除，2.5.2 把 Hook 侧实现也移除了，
-     * 该字段永久不会再有入口，因此同时登记在本表与 KNOWN_NO_HOOK。</p>
+     * <p>enablePoem：v2.6 古诗虫重新提供界面入口，并由 Controller → PoemRuntime 消费，不再属于例外。</p>
      */
     private static final Set<String> KNOWN_NO_UI =
             Set.of("enableIcon", "enableDramaBottom");
@@ -58,9 +57,7 @@ public class FeatureAuditTest {
      *
      * <p>enableIcon：2.7 起即为死字段。</p>
      *
-     * <p>enablePoem：2.5.2 起 Hook 侧的滚动古诗 Overlay 已整体移除（连同 PoemProvider），
-     * 界面在 v2.6 就没有入口了。字段与解析键保留只为向下兼容老 conf，
-     * App 侧固定写 0，不会再把「关不掉的行为」带进新版本。</p>
+     * <p>enablePoem：v2.6 由 PoemRuntime 重新消费；旧字段名保持兼容，不再属于死字段。</p>
      */
     private static final Set<String> KNOWN_NO_HOOK = Set.of("enableIcon");
 

@@ -279,7 +279,7 @@ public class ListModeTest {
     }
 
     private static int maxIndex(String main) throws Exception {
-        Matcher m = Pattern.compile("(?:Bool|Intv|Str)\\((\\d+)").matcher(main);
+        Matcher m = Pattern.compile("(?:Bool|Intv|Str|Longv)\\((\\d+)").matcher(main);
         int max = -1;
         while (m.find()) {
             max = Math.max(max, Integer.parseInt(m.group(1)));

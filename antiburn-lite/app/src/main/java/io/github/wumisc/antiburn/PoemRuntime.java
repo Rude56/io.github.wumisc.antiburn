@@ -266,7 +266,7 @@ final class PoemRuntime {
         private float[] lut;
         private boolean customCurve, bob, skipCutout, running, attached;
         private Listener listener;
-        private float currentLeft, currentTop, currentRight, currentBottom;
+        private float currentLeft, currentTop, currentRight, currentBottom, currentBaseline;
 
         OverlayView(Context c) {
             super(c);
@@ -344,7 +344,9 @@ final class PoemRuntime {
                 DisplayCutout c = insets == null ? null : insets.getDisplayCutout();
                 if (c == null) return;
                 for (Rect r : c.getBoundingRects()) {
-                    cutouts.add(new Rect(r.left - originX, r.top - originY, r.right - originX, r.bottom - originY));
+                    // 保守外扩 1px，覆盖字形抗锯齿与切孔边缘取整误差。
+                    cutouts.add(new Rect(r.left - originX - 1, r.top - originY - 1,
+                            r.right - originX + 1, r.bottom - originY + 1));
                 }
                 Collections.sort(cutouts, new Comparator<Rect>() {
                     @Override public int compare(Rect a, Rect b) { return Integer.compare(a.left, b.left); }
@@ -393,17 +395,24 @@ final class PoemRuntime {
                 p = 1;
                 running = false;
             }
+            float oldLeft = currentLeft, oldTop = currentTop;
+            float oldRight = currentRight, oldBottom = currentBottom;
             float progress = (float) Math.max(0, Math.min(1, p));
             float x = customCurve ? PoemMotion.lookup(lut, progress) : progress;
             float distance = screenW + textW + 16f;
             float left = screenW - x * distance;
-            float top = (screenH - (paint.ascent() + paint.descent())) / 2f - paint.ascent();
-            if (bob) top += (float) Math.sin(progress * Math.PI * 4) * 1.5f;
-            float right = left + textW;
-            float bottom = top - paint.ascent() + paint.descent();
-            currentLeft = left; currentTop = top - paint.ascent(); currentRight = right; currentBottom = bottom;
+            float bobOffset = bob ? (float) Math.sin(progress * Math.PI * 4) * 1.5f : 0f;
+            currentBaseline = (screenH - (paint.ascent() + paint.descent())) / 2f + bobOffset;
+            currentLeft = left;
+            currentTop = currentBaseline + paint.ascent();
+            currentRight = left + textW;
+            currentBottom = currentBaseline + paint.descent();
             if (listener != null) listener.onFrame(currentLeft, currentTop, currentRight, currentBottom);
-            invalidate();
+            int dirtyLeft = Math.max(0, (int) Math.floor(Math.min(oldLeft, currentLeft)) - 2);
+            int dirtyTop = Math.max(0, (int) Math.floor(Math.min(oldTop, currentTop)) - 2);
+            int dirtyRight = Math.min(screenW, (int) Math.ceil(Math.max(oldRight, currentRight)) + 2);
+            int dirtyBottom = Math.min(screenH, (int) Math.ceil(Math.max(oldBottom, currentBottom)) + 2);
+            if (dirtyRight > dirtyLeft && dirtyBottom > dirtyTop) invalidate(dirtyLeft, dirtyTop, dirtyRight, dirtyBottom);
             if (!running && listener != null) listener.onFinished();
         }
 
@@ -420,8 +429,7 @@ final class PoemRuntime {
 
         @Override protected void onDraw(Canvas canvas) {
             if (text == null || text.isEmpty()) return;
-            float baseline = (screenH - (paint.ascent() + paint.descent())) / 2f;
-            if (bob) baseline += (float) Math.sin(((currentLeft / Math.max(1f, screenW))) * Math.PI * 4) * 1.5f;
+            float baseline = currentBaseline;
             if (cutouts.isEmpty()) {
                 canvas.drawText(text, currentLeft, baseline, paint);
                 return;
@@ -430,7 +438,8 @@ final class PoemRuntime {
             float end = currentRight;
             for (int i = 0; i < cutouts.size() && cursor < end; i++) {
                 Rect r = cutouts.get(i);
-                if (r.right <= cursor || r.left >= end) continue;
+                if (r.right <= cursor || r.left >= end
+                        || r.bottom <= currentTop || r.top >= currentBottom) continue;
                 if (r.left > cursor) drawSegment(canvas, cursor, Math.min(r.left, end), baseline);
                 cursor = Math.max(cursor, r.right);
             }

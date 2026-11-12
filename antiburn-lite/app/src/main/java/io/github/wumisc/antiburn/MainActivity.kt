@@ -200,6 +200,7 @@ private val AbStateSaver = listSaver(
             fun Bool(i: Int, def: Boolean = false) = l.getOrNull(i) as? Boolean ?: def
             fun Intv(i: Int, def: Int) = l.getOrNull(i) as? Int ?: def
             fun Str(i: Int, def: String = "") = l.getOrNull(i) as? String ?: def
+            fun Longv(i: Int, def: Long) = l.getOrNull(i) as? Long ?: def
             AbState(
                 enableStatus = Bool(0, true),
                 enableNav = Bool(1),
@@ -239,7 +240,7 @@ private val AbStateSaver = listSaver(
                 poemSkipCutout = Bool(35, true),
                 poemBob = Bool(36),
                 poemLandscapePause = Bool(37, true),
-                poemSeed = (l.getOrNull(38) as? Long) ?: 20261112L,
+                poemSeed = Longv(38, 20261112L),
             )
         }
     },
@@ -1897,6 +1898,7 @@ private fun SubPageHost(
         "donate" -> "支持捐赠"
         "cycle" -> "周期时长"
         "credit" -> "致敬名单"
+        "poem" -> "古诗虫"
         else -> "设置"
     }
     Column(

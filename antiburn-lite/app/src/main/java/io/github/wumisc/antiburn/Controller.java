@@ -42,6 +42,7 @@ public final class Controller {
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static boolean hidden = false;
     private static boolean started = false;
+    private static boolean poemModeActive = false;
     private static long lastWlDiag = 0; // 白名单诊断日志节流
 
     private Controller() {
@@ -366,6 +367,14 @@ public final class Controller {
         // 只要导航栏开关开着，总开关关了隐藏动作照跑；enableShift 更是完全不看总开关，
         // 真机日志里 status=false 时 SHIFT 仍连续跑了 25 分钟。现在关掉即全部停止。
         if (!screenOn || !intervene) {
+            if (Config.enablePoem || poemModeActive) {
+                boolean poemStopped = FeatureGuard.guard("sys.poem",
+                        () -> PoemRuntime.tick(statusView, navView, true));
+                if (!poemStopped) {
+                    try { PoemRuntime.stop(); } catch (Throwable ignored) {}
+                }
+                poemModeActive = false;
+            }
             if (hidden) {
                 applyShow();
                 hidden = false;
@@ -378,6 +387,34 @@ public final class Controller {
             // 2 秒轮询，等恢复条件满足后继续周期
             handler.postDelayed(cycleRunnable, 2000);
             return;
+        }
+
+        // 古诗模式接管状态栏/导航栏：爬行时只透明化文字身后的最小模块，
+        // 时间阶段恢复原生状态栏。此模式下必须停用整窗隐藏和像素平移，
+        // 否则两套显示策略会互相覆盖，也会破坏已缓存的模块矩形。
+        if (Config.enablePoem) {
+            if (hidden) {
+                applyShow();
+                hidden = false;
+            }
+            if (PixelShift.isActive()) {
+                PixelShift.shutdown();
+                XposedInit.diag("SHIFT 停止：古诗虫接管状态栏");
+            }
+            final boolean landscapePause = Config.poemLandscapePause && isLandscape();
+            boolean poemOk = FeatureGuard.guard("sys.poem",
+                    () -> PoemRuntime.tick(statusView, navView, landscapePause));
+            if (!poemOk) {
+                try { PoemRuntime.stop(); } catch (Throwable ignored) {}
+            }
+            poemModeActive = true;
+            // 动画本身走 Choreographer；这里只负责低频重读配置和执行暂停条件。
+            handler.postDelayed(cycleRunnable, 2000L);
+            return;
+        }
+        if (poemModeActive) {
+            FeatureGuard.guard("sys.poem", PoemRuntime::stop);
+            poemModeActive = false;
         }
 
         // 统一周期相位：与抖音/红果（DouyinHook）共用「系统单调时钟对周期取模」判断此刻该隐藏还是显示，

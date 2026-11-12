@@ -1,3 +1,7 @@
+import io.github.wumisc.antiburn.PoemItem;
+import io.github.wumisc.antiburn.PoemLibrary;
+import io.github.wumisc.antiburn.PoemMotion;
+
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
