@@ -1,4 +1,4 @@
-# v2.6.0 poem-worm CI trigger
+# v2.6.0 poem-worm CI trigger (json exception fix)
 name: Build APK
 
 on:
@@ -118,4 +118,5 @@ jobs:
           git add "$LOG"
           git commit -m "Build failure log for run ${{ github.run_number }}"
           git push || true
+
 

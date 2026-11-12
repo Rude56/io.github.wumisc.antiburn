@@ -49,13 +49,17 @@ public final class PoemItem {
 
     public JSONObject toJson() {
         JSONObject o = new JSONObject();
-        o.put("id", id);
-        o.put("text", text);
-        o.put("author", author);
-        o.put("source", source);
-        o.put("origin", origin);
-        o.put("enabled", enabled);
-        o.put("chars", charCount);
+        try {
+            o.put("id", id);
+            o.put("text", text);
+            o.put("author", author);
+            o.put("source", source);
+            o.put("origin", origin);
+            o.put("enabled", enabled);
+            o.put("chars", charCount);
+        } catch (Throwable ignored) {
+            // All fields are strings/booleans/integers; keep partial JSON on a non-standard implementation.
+        }
         return o;
     }
 
@@ -121,4 +125,5 @@ public final class PoemItem {
         }
     }
 }
+
 
