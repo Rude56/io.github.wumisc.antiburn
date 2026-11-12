@@ -72,8 +72,9 @@ jobs:
 
       - name: Run JVM tests
         run: |
+          set -o pipefail
           chmod +x antiburn-tests/run-all.sh
-          ./antiburn-tests/run-all.sh
+          ./antiburn-tests/run-all.sh 2>&1 | tee "$GITHUB_WORKSPACE/test-full-log.txt"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -112,7 +113,9 @@ jobs:
         if: failure()
         run: |
           LOG="build-log-${{ github.run_number }}.txt"
-          if [ -f build-full-log.txt ]; then tail -c 60000 build-full-log.txt > "$LOG"; else echo "run=${{ github.run_number }} failed at $(date -u), no gradle log captured" > "$LOG"; fi
+          if [ -f build-full-log.txt ]; then tail -c 60000 build-full-log.txt > "$LOG"; fi
+          if [ -f test-full-log.txt ]; then printf '\n\n===== JVM TEST LOG =====\n' >> "$LOG"; tail -c 60000 test-full-log.txt >> "$LOG"; fi
+          if [ ! -f "$LOG" ]; then echo "run=${{ github.run_number }} failed at $(date -u), no build/test log captured" > "$LOG"; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$LOG"
