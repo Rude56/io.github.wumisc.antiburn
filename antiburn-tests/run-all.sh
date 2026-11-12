@@ -20,6 +20,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PROJ=$ROOT/antiburn-lite
 SRC=$PROJ/app/src/main/java/io/github/wumisc/antiburn
 CLS=$PROJ/app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes
+T=$ROOT/antiburn-tests
+JSON_JAR=$(ls "$T"/lib/json-*.jar 2>/dev/null | head -n 1)
 
 if [ -z "$ANDROID_JAR" ]; then
     SDK=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}
@@ -38,6 +40,10 @@ if [ ! -d "$CLS" ]; then
     echo "请先在 antiburn-lite 下执行：gradle :app:compileDebugKotlin :app:compileDebugJavaWithJavac" >&2
     exit 1
 fi
+if [ -z "$JSON_JAR" ] || [ ! -f "$JSON_JAR" ]; then
+    echo "错误：找不到 antiburn-tests/lib/json-*.jar" >&2
+    exit 1
+fi
 if [ -z "$ANDROID_JAR" ] || [ ! -f "$ANDROID_JAR" ]; then
     echo "错误：找不到 android.jar，请设置 ANDROID_HOME 或 ANDROID_JAR" >&2
     exit 1
@@ -46,13 +52,11 @@ fi
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
-T=$ROOT/antiburn-tests
-
 echo "=============================================="
 echo " 1/6 名单模式 + 界面结构（ListModeTest）"
 echo "=============================================="
-$JAVAC -cp "$CLS:$ANDROID_JAR" -d "$OUT/list" "$T/list-mode-test/ListModeTest.java"
-$JAVA -cp "$OUT/list:$CLS:$ANDROID_JAR" ListModeTest "$SRC"
+$JAVAC -cp "$JSON_JAR:$CLS:$ANDROID_JAR" -d "$OUT/list" "$T/list-mode-test/ListModeTest.java"
+$JAVA -cp "$OUT/list:$JSON_JAR:$CLS:$ANDROID_JAR" ListModeTest "$SRC"
 
 echo
 echo "=============================================="
@@ -79,18 +83,18 @@ echo
 echo "=============================================="
 echo " 5/6 配置层行为（ConfStoreTest）"
 echo "=============================================="
-$JAVAC -cp "$CLS:$ANDROID_JAR" -d "$OUT/conf" "$T/confstore-test/ConfStoreTest.java"
-$JAVA -cp "$OUT/conf:$CLS:$ANDROID_JAR" ConfStoreTest
+$JAVAC -cp "$JSON_JAR:$CLS:$ANDROID_JAR" -d "$OUT/conf" "$T/confstore-test/ConfStoreTest.java"
+$JAVA -cp "$OUT/conf:$JSON_JAR:$CLS:$ANDROID_JAR" ConfStoreTest
 
 echo
 echo
 echo "=============================================="
 echo " 6/6 诗库 / 顺序 / 公式（PoemTest）"
 echo "=============================================="
-$JAVAC -cp "$CLS:$ANDROID_JAR" -d "$OUT/poem" \
+$JAVAC -cp "$JSON_JAR:$CLS:$ANDROID_JAR" -d "$OUT/poem" \
     "$SRC/PoemItem.java" "$SRC/PoemLibrary.java" "$SRC/PoemMotion.java" \
     "$T/poem-test/PoemTest.java"
-$JAVA -cp "$OUT/poem:$CLS:$ANDROID_JAR" PoemTest
+$JAVA -cp "$OUT/poem:$JSON_JAR:$CLS:$ANDROID_JAR" PoemTest
 
 echo
 echo "全部套件通过。"

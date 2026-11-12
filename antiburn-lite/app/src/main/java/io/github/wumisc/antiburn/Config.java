@@ -59,7 +59,8 @@ public final class Config {
     public static volatile int showSec = 10;
 
     // v2.4 poem-worm runtime settings (global; poem metadata lives in JSON).
-    public static volatile String poemLocalJson = PoemLibrary.defaultsJson();
+    // 延迟到 Config.parse() 再生成默认 JSON：避免类初始化阶段触碰 SystemUI/测试桩 org.json。
+    public static volatile String poemLocalJson = "";
     public static volatile String poemOnlineJson = "[]";
     public static volatile String poemDeletedOnline = "";
     public static volatile String poemOrder = PoemLibrary.ORDER_SEQUENTIAL;
